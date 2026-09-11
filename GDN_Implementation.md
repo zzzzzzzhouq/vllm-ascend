@@ -163,6 +163,8 @@ h, v_new, S_final = AscendC chunk_gated_delta_rule_fwd_h(k, w, u, g)   ⑤ 跨 c
 o = AscendC chunk_fwd_o(q, k, v_new, h, scale, g)    ⑥ 输出 = chunk 间状态读出 + chunk 内注意力
 ```
 
+![chunk 路径六步流水线：每步的计算内容、模式与两处已落地优化](gdn_diagrams/gdn_chunk_pipeline.png)
+
 - ①–④ 是纯 Triton 核（移植自 flash-linear-attention）；
 - ⑤⑥ 用 AscendC 自定义算子实现（状态递推与输出计算访存密集，AscendC 更适合），输入转成 `[B, H, T, D]` 布局、转 bf16；
 - **状态布局**：进入前 `ssm_state` 需转置为 `[N, H, K, V]`（`transpose(-1,-2)`），结束再转回 `[N, Nv, Dv, Dk]`（gdn.py:549、564）；
@@ -171,7 +173,7 @@ o = AscendC chunk_fwd_o(q, k, v_new, h, scale, g)    ⑥ 输出 = chunk 间状�
 
 ### 4.2 CANN 融合路径（`_chunk_gated_delta_rule_fused`，gdn.py:97）
 
-`torch_npu.npu_chunk_gated_delta_rule` 把上述整条流水线融成单个 CANN 算子，条件全部满足才启用：
+`torch_npu.npu_chunk_gated_delta_rule` 把上述整条流水线融成单个 CANN 算子。**实际运行中 §4.1 的 Triton+AscendC 流水线是默认主路径**，CANN 融合算子是条件启用的可选加速——部分 CANN 版本/设备（如 A5，见 gdn.py 的 TODO 注释）不含该算子实现，探测失败即永久回退主路径：
 
 - **可用性探测**：`_probe_fused_chunk()` 在进程内首次调用时跑一次最小 smoke call（B=1、Dk=Dv=128、64 token），失败则永久回退 Triton 路径，结果类级缓存（gdn.py:49-95）；
 - 约束：`Dk == Dv == 128`、`Nv % Nk == 0`、仅非 PCP 场景；
@@ -248,7 +250,7 @@ GDN 不用 KV Cache，改用 **Mamba 状态池**，`self.kv_cache` 是二元组�
 
 ## 8. 关键设计要点小结
 
-1. **一条语义，三条实现路径**：数学上都是同一个 Delta 规则递推，按 token 类型分派到 chunk（并行）或 recurrent（串行）实现；prefill 又有 CANN 融合 / Triton 流水线两级，探测失败自动降级；
+1. **一条语义，三条实现路径**：数学上都是同一个 Delta 规则递推，按 token 类型分派到 chunk（并行）或 recurrent（串行）实现；prefill 以 Triton+AscendC 流水线为主路径，CANN 融合算子为条件启用的可选加速（探测失败自动回退）；
 2. **精度策略**：g 全程 fp32（log 空间，≤0）；递推状态保 fp32（recurrent 算子、Triton chunk 均支持），仅 CANN 融合路径因算子限制转 bf16；
 3. **性能策略**：chunk 元数据 CPU 预计算 + 异步搬运；状态池槽位化 in-place 更新；`torch.zeros` 保证图回放安全；host 侧 `tolist()` 等同步只发生在 builder（每步一次），核心路径无 `.item()`；
 4. **功能覆盖**：TP（按头切分）、PCP（prefill 序列并行 + 两轮 all_gather 状态修正）、投机解码（多 token 验证 + 状态回卷 + 混合 batch）、ACL Graph（固定图 padding + 空分支隔离）、310P 老设备独立实现。
