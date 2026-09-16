@@ -100,6 +100,10 @@ decode 和 spec 都走那个逐 token 递推的 AscendC 算子；prefill 默认�
 
 ![GDN 数据流：张量为节点、算子为边，三路分派与状态池交互](gdn_diagrams/gdn_dataflow.png)
 
+带每级流量大小的版本（从 hidden_states 到 out，每 token 的 GM 流量）：
+
+![GDN 单层前向完整数据流（含每级张量大小）](gdn_diagrams/gdn_full_dataflow.png)
+
 ## 4. prefill：分块算法
 
 逐 token 递推在 prefill 场景太慢，所以把序列切成 64 个一组的块，块内用 WY 变换把串行递推等价改写成矩阵乘，块间才串行。这节是全文重点。
@@ -199,6 +203,76 @@ chunk_fwd_o                   → ⑥ 输出（AscendC）
 - 变长序列用 `cu_seqlens` 描述边界，chunk 索引、偏移这些在排班表里 CPU 侧预算好再异步搬过来，热路径上没有 host 同步。
 - 空段（长度为 0 的序列）会被剔出 AscendC 核的索引，算完再把最终状态散射回去。
 
+#### 4.1.3 六个核的代码级解剖（融合分析的素材）
+
+融合类优化（比如把②③④合成一个核）能省多少、难在哪，答案都藏在核与核的"交接面"里。这一小节把每个核的启动方式、任务切分、片上工作集和融合接口列出来。约定：BT=64，K=V=128。
+
+**① 块内前缀和**（cumsum.py）
+
+- 启动：grid = (块组数, B)，num_warps=8。块组大小由工作集预算反推：`next_pow2(2^18/(H×64))`，H=16 时为 256 token——又一个"预算定形状"的例子；
+- 任务：一个 program 吃 (256 token × 16 头) 的 fp32 瓷砖（16 KB），reshape 后 `tl.cumsum` 沿块内轴扫描；
+- 融合接口：读 gating 的 g、产出 gcum。② 只需要自己那 64 个 token 的 gcum，①可被②吸收（每块 64 次加法，成本可忽略）。
+
+**② 相似度矩阵**（chunk_scaled_dot_kkt.py）
+
+- 启动：常驻风格，grid=(AIC 数,)，`tl.range(core_id, task_num, num_core)` 领任务；num_warps=8、num_stages=3、multibuffer=True；
+- 任务 = (块, 头)：k (64,128) bf16 载入 → `tl.dot(k, kᵀ)`（K=BK=128，循环 1 次、编译期消失）→ ×β → exp(g_i−g_j) → 严格下三角掩码 → 存 A；
+- UB 工作集：k 双缓冲 32 KB + A 16 KB ≈ 50-70 KB；
+- 融合接口：k 与 ④ 重复读 GM；A 只被 ③ 消费一次。
+
+**③ 求逆（③a 小块求逆 + ③b 分块合并）**（solve_tril.py）
+
+- ③a：grid=(cdiv(T,1216), B×H)，num_warps=1。每 program 两趟、每趟 38 个 16×16 对角块；行循环 15 步用"广播乘+归约"模拟矩阵乘（Vector 单元），靠 `extract_slice`/`insert_slice`（本仓 Triton 扩展算子）搬行；UB 工作集 ~80-100 KB——1216/38/2 这组数字就是 UB 预算反推出来的；
+- ③b：grid=(cdiv(T,64), B×H)，num_warps=4。每 (块, 头)：读 A 的非对角碎片（~9 KB）+ Ad（6 KB）→ 三次 Schur 补小乘（Cube）→ `insert_slice` 拼装 → 存 Ai bf16（8 KB）；
+- 融合接口：③a→③b 之间 Ad 落盘一次纯属实现选择；③ 的批量摊薄结构（76 块一起递推）是融合的最大障碍。
+
+**④ WY 重构**（wy_fast.py）
+
+- 启动：grid=(块数, B)，num_warps=4；**program 内循环头**（`for i_bh in range(H)`）——和 ② 的常驻风格相反；
+- 任务 = (块, 序列)：Ai 载入一次（8 KB，w/u 两趟复用）→ Vector 预缩放（v×β、k×βγ）→ 4 次 64³ dot → 存 w/u；
+- 融合接口：Ai 来自③、k 与②重复读、产出 w/u 给⑤。
+
+**⑤ 状态递推**（AscendC，csrc/moe/chunk_gated_delta_rule_fwd_h）
+
+- **混合核（MIX_AIC_1_2）**：1 个 AI Core + 2 个向量核一组，`ASCEND_IS_AIC` / `ASCEND_IS_AIV` 两套代码分支分别运行，**通过 GM workspace + 跨核硬件旗标通信**——两种核的 UB 各自私有，不共享。这修正了一个容易想当然的图景：Triton 核（②④）里 Cube/Vector 确实在同一核的 UB 上会合，但 ⑤⑥ 的编舞是跨核的，所以必须手写 AscendC；
+- **每块的编舞**（递推 S_{c+1} = 衰减(S_c) + kᵀ·净写入 拆成四个阶段）：
+  - Cube C1：`v_work = w @ S_c` —— 用 w 检索当前状态，算出 u 里继承的初态成分要扣多少；
+  - Vector V1：`v_update = u − v_work`，再乘块内衰减 exp（源码注释原文：gmV = gmU − gmVWorkspace；g_buf = exp(g[last]−g)；gmVWorkspace = g_buf·gmV）；
+  - Cube C2：`h_{c+1} = kᵀ @ v_update`；
+  - Vector V2：合并（衰减后的旧态 + C2 结果），写快照 h 到 GM、处理 final_state。
+- **流水**：两路 ping-pong（streamId 0/1），Cube 算第 c 块时 Vector 处理第 c+1 块，`CrossCoreSetFlag/WaitFlag`（vec1Done/vec2Done/cube1Done/cube2Done）互锁；
+- **UB 布局**：AIV 侧手动划分——状态 ping/pong 缓冲在 0/96 KB，快照缓冲在 64/160 KB（不同阶段复用同一片 UB）；中转数据（v_work、v_update、kDecay、h_work）走 **GM workspace**——跨核不共享 UB 的代价；
+- tiling：host 端 tiling processor 按任务数分配 blockDim，tilingKey 按 vHeadDim 选 128/256 两套 TileShapes 模板。
+
+**⑥ 输出**（AscendC，csrc/moe/chunk_fwd_o）
+
+- 同样是 MIX_AIC_1_2 混合核，每块三个 Cube 阶段 + 两个 Vector 阶段：
+  - Cube C1：`attn = q @ kᵀ`（64×64）
+  - Vector V1：因果掩码 + 衰减 exp（经 aftermask workspace）
+  - Cube C2：`h_work = q @ S_c`（块间读出）
+  - Cube C3：`v_work = attn @ v_new`（块内注意力加权）
+  - Vector V2：`o = scale·(C2 + C3)` 合并（含衰减）
+- 中转同样走 GM workspace（attn、aftermask、h_work、v_work）。注意 attn 这份 64×64 在核内要走四趟显存（写→读做掩码→写→C3 读），约 0.5-1 KB/token·头的核内税——roofline 账本里没有单列这一项。
+
+**核间交接面总表**
+
+| 交接 | 张量 | 大小/块·头 | 融合障碍 |
+|---|---|---|---|
+| gating→① | g | 0.25 KB | 无，同粒度 |
+| ①→② | gcum | 0.25 KB | 无——②可块内重算吸收① |
+| ②→③ | A（即 L） | 16 KB | ③a 的批量摊薄被打破（每 task 只剩 4 块） |
+| ③a→③b | Ad | 4 KB | 无——落盘纯属实现选择 |
+| ③→④ | Ai | 8 KB | 无 |
+| ②与④ | k（重复读） | 16 KB×2 | 融合②④可共享载入 |
+| ④→⑤ | w、u | 32 KB | 跨语言（Triton→AscendC） |
+| ⑤→⑥ | h、v_new | 48 KB | 跨核（GM workspace 中转）＋ ⑥ 要重读 q/k |
+
+**"三合一"的三种具体形态**（供讨论的起点）：
+
+- 方案 X（②+③+④ 全合）：task=(块,头)，k 只载一次，L/Ai 常驻 UB。障碍：③ 的批量摊薄被打破，且 UB 工作集 ~90 KB 偏紧；
+- 方案 Y（②+④ 合、③ 独立）：k 共享载入、省两次落盘，③ 保住批量摊薄——折中方案，可行性最高；
+- 方案 Z（③a+③b 合一）：Ad 不落盘，最保守，先验证融合收益再谈大的。
+
 ### 4.2 CANN 融合路径
 
 torch_npu 里自带一个把整条流水线合成单个算子的官方实现（出场人物表里的 `npu_chunk_gated_delta_rule`）。但实际跑起来，4.1 的 Triton+AscendC 流水线才是默认路径，官方算子是条件启用的加速：部分 CANN 版本和设备上没有这个实现（A5 就是，代码里有 TODO 注释），所以先探测再用。
@@ -286,6 +360,10 @@ GDN 的"记忆"不放 KV Cache，放在一个按槽位管理的状态池里。�
 | 合计 | | ~7.9 KB |
 
 算力强度 12 MFLOP / 7.9 KB ≈ 1.5 KFLOP/B，刚好卡在机器平衡点（约 1 KFLOP/B）附近。也就是说计算和访存大约各占一半时间，流量削减大概按一半折算成端到端收益。下面的收益都是这个口径下的估算，动手前应当先 profiling 验证。
+
+这 7.9 KB 在存储层级上的逐步去向（每步什么对象、多大、在 GM/UB/L0 之间怎么搬，含 Cube/Vector 编舞）：
+
+![存储层级数据流：GM/UB/L0 之间的逐步搬运与合计对账](gdn_diagrams/gdn_memory_flow.png)
 
 ### 9.2 已落地的两处优化
 
