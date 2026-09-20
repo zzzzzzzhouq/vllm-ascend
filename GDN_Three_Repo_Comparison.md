@@ -25,11 +25,27 @@
 | Python 编排自由度 | 高（PCP 修正、spec、CANN 回退都在 Python） | 低（算子内固定） | 低 |
 | 功能覆盖 | PCP / 投机 / 变长 / 图捕获 | 基础前向 | 基础前向（变长已修，PCP/spec 缺） |
 
+### decode 路径：三版都有，且同构
+
+三版都不只做 prefill 的 chunk 路径——**decode/投机走的逐 token 递推算子在三版里都独立存在**，且形态一致：
+
+| | 位置 | 说明 |
+|---|---|---|
+| vllm-ascend | `csrc/attention/recurrent_gated_delta_rule/`（AscendC） | 槽位原地更新、num_accepted_tokens 回卷（§5 已详述） |
+| ops-transformer | `attention/recurrent_gated_delta_rule/`（独立算子目录） | 同名算子，同款逐 token 递推 |
+| fla-npu | `fla/ops/ascendc/gdn/recurrent_gdn/recurrent_gated_delta_rule/` | 同名算子；Python 壳注册为 `npu_recurrent_gated_delta_rule` |
+
+也就是说，"chunk 融合"这条优化主线只作用于 prefill 路径；decode 路径在三版中本来就是单个算子、延迟形态，没有融合空间，三版基本照抄同一个设计。**差异全部集中在 prefill 的 chunk 路径上**——这也是本文对比的主体。
+
 ![vllm-ascend 六步流水线](gdn_diagrams/cmp_vllm_ascend.png)
 
 ![ops-transformer 单算子三阶段](gdn_diagrams/cmp_ops_transformer.png)
 
 ![fla-npu 单核 Phase6 全融合](gdn_diagrams/cmp_fla_npu.png)
+
+三版并排对比（一图总览）：
+
+![GDN 三版实现并排对比](gdn_diagrams/cmp_three_side_by_side.png)
 
 ---
 
