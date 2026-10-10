@@ -18,6 +18,8 @@
 | `yq_files/check_contention.py` | 查这趟有没有被别的任务干扰 | 只读日志 |
 | `yq_files/fake_bench.py` | 假 bench，`--bench` 指向它就能空跑验流程，不碰 NPU | 无 |
 | `yq_files/tests/test_fsao_precision.py` | **精度用例**，带 fp32 golden，两种签名都认 | pytest / memfabric_hybrid |
+| `yq_files/env.sh` | 一次 source 就绪：toolkit + `SOC_VERSION`（默认 ascend910_93）+ vendor 路径 | bash |
+| `yq_files/build_ops.sh` | 全量编译：算子 vendor 包 + `vllm_ascend_C.so`，编完即可测 | setup.py / CANN |
 
 ⚠ **保持相对位置**：`sweep_median.py` 按 `__file__` 往上两级找
 `tests/ut/test_fuse_sparse_attention_overlap_precisions.py`。放到别处就显式传
@@ -32,31 +34,53 @@ planner / 外部计划 LRU）**只测一条会漏掉真问题**——原仓库�
 
 bench 开头会检查 `ASCEND_CUSTOM_OPP_PATH`，为空直接退出并打印修法
 （确实想跳过检查设 `DSA_SKIP_ENV_CHECK=1`）。本仓库 kernel 不在
-`vllm_ascend_C.so` 里，在 CANN vendor 算子包里：
+`vllm_ascend_C.so` 里，在 CANN vendor 算子包里。
+
+**一键流程（推荐）**：
 
 ```bash
-# 1) 编 vendor 算子包（A3 = ascend910_93，本算子只编这一个）
-cd csrc
-bash build.sh --pkg --soc=ascend910_93 --ops=fused_sparse_attention_overlap
-
-# 2) 安装并导出
-bash ./build_out/cann-ops-transformer-custom_linux-*.run \
-    --quiet --install-path=$HOME/fsao_opp
-export ASCEND_CUSTOM_OPP_PATH=$HOME/fsao_opp/vendors/custom
-
-# 3) CANN 环境（按机器实际路径）
-source /usr/local/Ascend/ascend-toolkit/set_env.bash
-
-# 4) 本仓库 Python 侧（注册 torch.ops._C_ascend.* 的 pybind 模块）
-cd .. && pip install -e . --no-build-isolation
-
-# 5) memfabric_hybrid（CPU KV 池后端；yq 环境同款）
-pip install memfabric_hybrid   # 或按机器已有安装方式
+source yq_files/env.sh        # toolkit + SOC_VERSION（缺省补 ascend910_93）+ vendor 路径
+bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
 ```
 
-⚠ **改过 csrc/ 下任何头文件必须全量重编**。增量编译是否生效只能看 `.o`
-的 md5 指纹——时间戳、文件名里的哈希、编译日志里出现算子名，三样全都骗人
-（ninja 返回 0 但 vendor 继续用旧 kernel 的情况真实发生过）。
+`build_ops.sh` 做的事 = `python3 setup.py build_aclnn`（编 vendor 算子包并
+就地装进 `vllm_ascend/_cann_ops_custom/`，本仓库 `vllm_ascend` import 时会
+自动补 `ASCEND_CUSTOM_OPP_PATH`）+ `python3 setup.py build_ext --inplace`
+（编 pybind 模块）。两步缺一不可——只跑 build_ext 就是「.so 换了、kernel
+没换」。脚本结尾会打印 `.so` 列表、算子 kernel `.o` 的 md5 指纹，并试
+import 确认算子注册上了。
+
+首次使用（或换机器/换 venv）还要补两件事，之后日常增量就不用了：
+
+```bash
+pip install -e . --no-build-isolation   # 注册包路径（build_ops.sh 不代劳，避免双重编译）
+pip install memfabric_hybrid            # bench 的 CPU KV 池后端
+```
+
+⚠ **改过 csrc/ 下任何头文件必须全量重编**（脚本默认删 build 全量）。
+增量编译是否生效只能看 `.o` 的 md5 指纹——时间戳、文件名里的哈希、编译
+日志里出现算子名，三样全都骗人（ninja 返回 0 但 vendor 继续用旧 kernel
+的情况真实发生过）。
+
+手动等价流程（排查脚本问题时用）：
+
+```bash
+# 1) CANN 环境（按机器实际路径）
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export SOC_VERSION=ascend910_93    # 本仓库 setup.py 不自动探测，必须显式导出
+
+# 2) 编 vendor 算子包并就地安装（等价于 setup.py build_aclnn）
+cd csrc
+bash build.sh --pkg --soc=ascend910_93 --ops=fused_sparse_attention_overlap
+bash ./build/cann-ops-transformer*.run --install-path=../vllm_ascend/_cann_ops_custom
+cd ..
+
+# 3) 本仓库 Python 侧（注册 torch.ops._C_ascend.* 的 pybind 模块）
+pip install -e . --no-build-isolation
+
+# 4) memfabric_hybrid（CPU KV 池后端；yq 环境同款）
+pip install memfabric_hybrid   # 或按机器已有安装方式
+```
 
 ## 3. 一条命令
 
@@ -139,8 +163,10 @@ plan_slots、--kernel-time。要跟自己的优化比，**基线也得用同样�
 
 ## 7. 与原仓库（poolingDSA）的差别
 
-- 环境准备换成 vllm-ascend 上游的 `csrc/build.sh` vendor 包流程（原仓库的
-  `env.sh` 写死了容器路径，没有带过来）。
+- 环境准备换成 vllm-ascend 上游的 `setup.py build_aclnn` vendor 包流程；
+  `env.sh`/`build_ops.sh` 是原仓库同名脚本的去容器化改写（写死的容器路径、
+  memfabric/atb 段去掉，SOC_VERSION 兜底补 ascend910_93，编译入口换成
+  build_aclnn + build_ext 两步）。
 - bench 开头指向的精度用例路径改为本仓库的
   `tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py`。
 - 其余（bench 主体、sweep_median、cmp_sweeps、fake_bench、check_contention、
