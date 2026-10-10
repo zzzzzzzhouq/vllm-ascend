@@ -1,0 +1,2 @@
+# shell 脚本要拷到 Linux 机器上跑，强制 LF（含 heredoc，CRLF 会直接坏）
+yq_files/*.sh text eol=lf
