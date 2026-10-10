@@ -26,7 +26,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -119,11 +119,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
-        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
-
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -137,7 +132,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
-        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        # Communication objects are shared across MoE layers. Keep the bound
+        # activation with its owning layer when a later layer replaces them.
+        self.routed_experts.mega_moe_activation_kwargs = getattr(
+            get_moe_comm_method(MoECommType.FUSED_MC2, self.moe_config), "mega_moe_activation_kwargs", None
+        )
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL, self.moe_config)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
@@ -146,6 +146,97 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
+        through the OOT PluggableLayer dispatch of ``MoERunner``).
+
+        Upstream inlines the shared+routed output combine, which is not
+        exposed as an overridable hook. On NPU the combine goes through the
+        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
+        launch count is independent of the tensor-list length and which is
+        the NPU-validated fast path for the MoE combine. Every other step,
+        including the runtime-aware reduction hooks (#16550), is inherited
+        unchanged.
+
+        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
+        the superkernel integration, upstream's plain add becomes the fast
+        path and this override can be dropped.
+        """
+        # Apply transform for routed experts (e.g., latent projection for
+        # latent MoE). When the caller pre-applies the routed input transform
+        # outside the runner (e.g. to overlap it on a separate stream), it
+        # passes the already-transformed routed input as ``hidden_states`` and
+        # the original hidden states as ``shared_experts_input``; skip the
+        # transform in that case so shared experts still see the original input.
+        if shared_experts_input is None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # so routed output can be trimmed before
+        # shared+routed add / latent up proj if needed.
+        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
+            shared_experts_input,
+            hidden_states,
+        )
+
+        result = self._forward_entry(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+            self._encode_layer_name(),
+            self.moe_config.hidden_dim_unpadded if self._quant_method.has_unpadded_output else 0,
+        )
+
+        #
+        # Note: there are two all-reduce points below. They are mutually
+        # exclusive, controlled by _fused_output_is_reduced
+        #  - When True: the combine kernel already reduced fused_output,
+        #    so we reduce shared_output here to match, then skip the
+        #    all-reduce in _maybe_reduce_final_output.
+        #  - When False: neither output is reduced yet, so we combine
+        #    them first and all-reduce the sum in _maybe_reduce_final_output.
+
+        # Extract outputs from result
+        shared_output, fused_output = _unpack(result)
+
+        if og_hidden_dim_pre_xform is not None:
+            fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
+        fused_output_is_reduced = self._fused_output_is_reduced
+
+        # Latent routed output has to be reduced before output transform,
+        # because the transform may include non-linear normalization.
+        fused_output, fused_output_is_reduced = self._maybe_reduce_routed_output_before_transform(
+            fused_output,
+            fused_output_is_reduced,
+        )
+
+        # If routed output is already reduced, reduce shared to match.
+        # See note above re: the two all-reduce points.
+        shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
+
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+
+        # Apply output transform (e.g. latent -> full dim)
+        fused_output = self.apply_routed_output_transform(fused_output)
+
+        if shared_output is not None:
+            result = torch._foreach_add([shared_output], [fused_output])[0]
+        else:
+            result = fused_output
+
+        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
+
+        return self._maybe_add_zero_expert_output(result)
 
     @property
     def is_internal_router(self) -> bool:
@@ -293,15 +384,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Gate linears are unquantized. Their weight is normally pre-cast by
-        # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
+        """Compute router logits without extending a fresh FP32 cast's lifetime.
+
+        The FP32 activation stays local to this helper and becomes releasable
+        after the gate linear is enqueued. An existing FP32 ``router_logits``
+        remains caller-owned. Gates without a pre-cast weight keep using their
+        registered forward path and must not allocate an unused FP32 input.
+        """
         gate = self.gate
         assert gate is not None
-        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
-        if hasattr(gate, "weight_fp32"):
-            return F.linear(hidden_states_fp32, gate.weight_fp32)
-        gate_out = gate(hidden_states)
-        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        if not hasattr(gate, "weight_fp32"):
+            gate_out = gate(hidden_states)
+            return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
+        # AscendUnquantizedLinearMethod normally pre-casts the weight so the
+        # hot path only needs to materialize the FP32 activation when required.
+        router_input = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+        return F.linear(router_input, gate.weight_fp32)
 
     def _prepare_router_and_milestones(
         self,

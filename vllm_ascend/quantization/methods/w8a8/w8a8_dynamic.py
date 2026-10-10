@@ -313,6 +313,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
+            # MegaMoe reads the fused int64 scale lists above exclusively for
+            # activations whose fused MC2 path supports the scale layout.
+            # swigluoai_uninterleave still uses the standard GMM path, which
+            # reads the fp32 scale copy during forward.
+            activation = getattr(layer, "activation", "silu")
+            activation = getattr(activation, "value", activation)
+            if activation != "swigluoai_uninterleave":
+                del layer.w13_weight_scale_fp32
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
@@ -334,12 +342,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         activation = getattr(layer, "activation", "silu")
         act_name = getattr(activation, "value", activation)
-        fused_scale_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
-            and get_ascend_config().enable_fused_mc2 == 1
-            and act_name != "swigluoai_uninterleave"
-        )
-        use_mega_moe = fused_scale_flag and _EXTRA_CTX.use_mega_moe
+        is_fused_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
+        # dispatch_ffn_combine does not support SwiGLU-OAI fused scales.
+        # MegaMoe can still consume the per-expert NZ weight/scale lists.
+        fused_scale_flag = is_fused_mc2 and act_name != "swigluoai_uninterleave"
+        use_mega_moe = is_fused_mc2 and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             if use_mega_moe:
                 return MoEWeights(
@@ -489,7 +496,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer = mlp_compute_input.layer
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
         w2_scale_dtype = w2_scale[0].dtype
-        scale = [w1_scale[0].to(w2_scale_dtype)]
+        # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
+        # then scales must be per-expert too — aclnn grouped_matmul requires
+        # len(scale) == len(weight). The stacked path keeps a single-element list.
+        scale = [s.to(w2_scale_dtype) for s in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],

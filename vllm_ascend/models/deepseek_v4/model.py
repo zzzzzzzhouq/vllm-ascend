@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
@@ -72,11 +73,11 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -89,18 +90,20 @@ from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
+    dsv4_skips_indexer_topk,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
@@ -124,9 +127,6 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        self.dtype = get_dsv4_attn_kv_dtype(vllm_config)
-        if self.dtype == torch.float8_e4m3fn:
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
@@ -548,10 +548,10 @@ class DeepseekV4Attention(nn.Module):
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
 
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
+            rope_theta = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            rope_theta = config.rope_theta
             rope_groups = ["default"]
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
@@ -561,7 +561,7 @@ class DeepseekV4Attention(nn.Module):
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
             scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
+            base=rope_theta,
             beta_fast=config.rope_parameters["beta_fast"],
             beta_slow=config.rope_parameters["beta_slow"],
             rope_groups=rope_groups,
@@ -580,16 +580,9 @@ class DeepseekV4Attention(nn.Module):
         # only, leaving impl-level references stale.
         skip_topk = False
         if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
+            pp_group = get_pp_group()
+            pp_start_layer, _ = get_pp_indices(config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+            skip_topk = dsv4_skips_indexer_topk(config, config_layer_idx, pp_start_layer)
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -615,11 +608,13 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        if is_turboquant(vllm_config):
+            kv_cache_dtype = torch.bfloat16
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=k_dtype,
+            dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )
@@ -883,19 +878,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        self._needs_mtp_hidden_states = bool(
+            get_pp_group().is_last_rank
+            and spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
-        self._mtp_hidden_buffer = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                hc_dim,
-                dtype=vllm_config.model_config.dtype,
-                device=self.device,
-            )
-            if get_pp_group().is_last_rank and needs_mtp_hidden_states
-            else None
+        self._mtp_buffer_shape = (
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            hc_dim,
         )
+        self._mtp_buffer_dtype = vllm_config.model_config.dtype
+        self._mtp_hidden_buffer: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -937,7 +930,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)  # TODO: support PP with dsacp.
+            # Non-first PP ranks receive None input_ids (the embedding was
+            # done upstream); only shard on the rank that owns the tokens.
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
@@ -968,6 +964,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
+            # The next PP rank expects full-sequence hidden states; undo the
+            # sequence sharding applied above before crossing the PP boundary.
+            if self.use_sequence_parallel_moe:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -983,7 +983,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
+        if self._needs_mtp_hidden_states:
+            if self._mtp_hidden_buffer is None:
+                self._mtp_hidden_buffer = torch.empty(
+                    self._mtp_buffer_shape,
+                    dtype=self._mtp_buffer_dtype,
+                    device=self.device,
+                )
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -1104,6 +1110,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
