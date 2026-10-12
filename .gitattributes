@@ -1,2 +1,4 @@
-# shell 脚本要拷到 Linux 机器上跑，强制 LF（含 heredoc，CRLF 会直接坏）
-yq_files/*.sh text eol=lf
+# shell 脚本统一 LF：blob 本就是 LF，此规则只影响检出行为——
+# 保证 Windows（autocrlf=true）检出的工作副本也是 LF，整目录拷到
+# Linux/NPU 机器时 bash 不会报 $'\r': command not found。
+*.sh text eol=lf
