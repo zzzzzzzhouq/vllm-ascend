@@ -3,8 +3,9 @@
 # （原仓库 env.sh 写死了容器路径、还带 memfabric/atb 段，与本仓库无关，未照搬。）
 #
 # 用法：
-#   source yq_files/env.sh
-#   DSA_REPO=/path/to/repo source yq_files/env.sh   # 仓库不是脚本上一级时
+#   source yq_files/env.sh                      # 自动定位仓库（脚本上一级）
+#   source yq_files/env.sh /path/to/repo        # 显式指定（兼容原版用法）
+#   DSA_REPO=/path/to/repo source yq_files/env.sh
 #
 # 幂等：重复 source 不会把路径变量越堆越长。
 #
@@ -16,7 +17,7 @@
 #                          （utils.bootstrap_custom_op_env），显式导出是为了
 #                          脱离 vllm_ascend 的裸 torch 脚本也能找到算子。
 
-_dsa_repo="${DSA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+_dsa_repo="${1:-${DSA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}}"
 export DSA_REPO="$_dsa_repo"
 echo "[env.sh] repo = $_dsa_repo"
 
