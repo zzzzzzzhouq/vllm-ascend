@@ -34,8 +34,24 @@ echo "REPO=$REPO"
 cd "$REPO" || exit 1
 
 if [ -z "${SOC_VERSION:-}" ]; then
-    export SOC_VERSION=ascend910_9391
-    echo "⚠ SOC_VERSION 未导出，兜底设为 $SOC_VERSION（A3 具体型号；cmake 只认型号，不认家族名）"
+    _dsa_chip=""; _dsa_npu=""
+    if command -v npu-smi >/dev/null 2>&1; then
+        _dsa_info="$(npu-smi info -m 2>/dev/null || true)"
+        _dsa_chip="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/Chip Name/{print $2; exit}')"
+        _dsa_npu="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/NPU Name/{print $2; exit}')"
+    fi
+    case "${_dsa_chip,,}" in
+        *910*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
+    esac
+    if [ -n "${SOC_VERSION:-}" ]; then
+        echo "SOC_VERSION 未导出，已从 npu-smi 识别为 $SOC_VERSION"
+    fi
+fi
+if [ -z "${SOC_VERSION:-}" ]; then
+    echo "❌ 无法确定 SOC_VERSION（npu-smi 不可用/识别失败，且未手动导出）。"
+    echo "   请 export SOC_VERSION=<具体芯片型号>，如 ascend910_9382（A3）、ascend910b1（A2）。"
+    echo "   ⚠ 要具体型号：setup.py 的 cmake 只认型号；家族名（ascend910_93）会挂在 host_config.cmake。"
+    exit 1
 fi
 echo "SOC_VERSION=$SOC_VERSION"
 

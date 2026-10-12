@@ -45,16 +45,30 @@ if [ -z "${ASCEND_TOOLKIT_HOME:-}" ]; then
 fi
 
 # 2) 目标芯片。⚠ 两个消费者要的值不同：
-#    - setup.py 的 cmake（编 .so）要**具体芯片型号**，A3 = ascend910_9391
-#      （CANN host_config.cmake 只认型号，不认家族名）
-#    - csrc/build.sh --soc / build_aclnn.sh 要**家族名** ascend910_93，
-#      它们会自动从 ascend910_9391 映射回去（正则 ^ascend910_93）
-#    所以这里统一导出型号名 ascend910_9391。
-case "${SOC_VERSION:-}" in
-    ascend*) echo "[env.sh] SOC_VERSION=$SOC_VERSION（沿用外部导出）" ;;
-    *)       export SOC_VERSION=ascend910_9391
-             echo "[env.sh] SOC_VERSION 未导出，默认设为 ascend910_9391（A3 具体型号）" ;;
-esac
+#    - setup.py 的 cmake（编 .so）要**具体芯片型号**（CANN host_config.cmake
+#      只认型号，如 ascend910_9382 / ascend910_9391，不认家族名 ascend910_93）
+#    - csrc/build.sh --soc / build_aclnn.sh 要**家族名**，会自动从具体型号映射
+#      回去（正则 ^ascend910_93）
+#    SOC_VERSION 未导出时优先用 npu-smi 识别真实型号；识别不了就留空，交给
+#    setup.py 自行探测（A2/310P/950 等非 A3 机器请手动 export 具体型号）。
+if [ -z "${SOC_VERSION:-}" ]; then
+    _dsa_chip=""; _dsa_npu=""
+    if command -v npu-smi >/dev/null 2>&1; then
+        _dsa_info="$(npu-smi info -m 2>/dev/null || true)"
+        _dsa_chip="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/Chip Name/{print $2; exit}')"
+        _dsa_npu="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/NPU Name/{print $2; exit}')"
+    fi
+    case "${_dsa_chip,,}" in
+        *910*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
+    esac
+    if [ -n "${SOC_VERSION:-}" ]; then
+        echo "[env.sh] SOC_VERSION 未导出，已从 npu-smi 识别为 $SOC_VERSION"
+    else
+        echo "[env.sh] ⚠ SOC_VERSION 未导出且 npu-smi 未能识别 —— 交给 setup.py 自行探测；仍失败请手动 export SOC_VERSION=<具体型号，如 ascend910_9382>"
+    fi
+else
+    echo "[env.sh] SOC_VERSION=$SOC_VERSION（沿用外部导出）"
+fi
 
 # 3) 自定义算子 vendor 包（build_ops.sh 的产物就装在仓库里）。
 _dsa_vendor="$_dsa_repo/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"
