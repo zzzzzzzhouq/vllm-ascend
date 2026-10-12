@@ -117,7 +117,17 @@ fi
 
 echo
 echo "==================== [2/2] vllm_ascend_C .so（setup.py build_ext --inplace） ===================="
-python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+# ⚠ setup.py 的 cmake_build_ext 在 COMPILE_CUSTOM_KERNELS=1（默认）时，每次都会先
+#   重跑一遍全量 build_aclnn（40+ 算子 + catlass 子模块）——单算子迭代纯属浪费。
+#   .so 只含 pybind/torch_binding 注册层：改 kernel / op_host tiling 不影响它。
+#   ⚠ 若改了 csrc/torch_binding.cpp（算子 schema），请 rm vllm_ascend/*.so 强制全量重编。
+if ls vllm_ascend/*.so >/dev/null 2>&1; then
+    echo ".so 已存在 → COMPILE_CUSTOM_KERNELS=0 跳过内部的全量 build_aclnn 重触发"
+    COMPILE_CUSTOM_KERNELS=0 python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+else
+    echo "未发现已有 .so → 首次完整编（内含全量 build_aclnn，需要 catlass 子模块，一次性成本）"
+    python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+fi
 rc2=${PIPESTATUS[0]}
 
 echo
