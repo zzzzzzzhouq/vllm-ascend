@@ -34,10 +34,20 @@ echo "REPO=$REPO"
 cd "$REPO" || exit 1
 
 if [ -z "${SOC_VERSION:-}" ]; then
-    export SOC_VERSION=ascend910_93
-    echo "⚠ SOC_VERSION 未导出，兜底设为 $SOC_VERSION（A3）。别的芯片请显式导出。"
+    export SOC_VERSION=ascend910_9391
+    echo "⚠ SOC_VERSION 未导出，兜底设为 $SOC_VERSION（A3 具体型号；cmake 只认型号，不认家族名）"
 fi
 echo "SOC_VERSION=$SOC_VERSION"
+
+# csrc/build.sh 的 --soc 要家族名（ascend910_93），从具体型号推导：
+case "$SOC_VERSION" in
+    ascend910_93*) SOC_FAMILY=ascend910_93 ;;
+    ascend910b*)   SOC_FAMILY=ascend910b ;;
+    ascend310p*)   SOC_FAMILY=ascend310p ;;
+    ascend950*)    SOC_FAMILY=ascend950 ;;
+    *)             SOC_FAMILY="$SOC_VERSION" ;;
+esac
+echo "SOC_FAMILY=$SOC_FAMILY（csrc/build.sh --soc 用）"
 
 # CANN toolkit
 if [ -z "${ASCEND_TOOLKIT_HOME:-}" ] && [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
@@ -97,14 +107,14 @@ if [ -n "${OPS:-}" ]; then
     # 单算子模式：OPS=fused_sparse_attention_overlap bash yq_files/build_ops.sh
     # csrc/build.sh 直编 + .run 就地安装。不经过 setup.py build_aclnn，因此
     # 不会触发 catlass 子模块拉取（内网代理 407 踩过），只编 --ops 指定的算子。
-    # ⚠ --soc 传的是 $SOC_VERSION 本身；ascend910_93 下两者同形。其他芯片若
-    #   SOC_VERSION 与 build.sh 的 --soc 口径不一致，请显式传 OPS 时一并核对。
+    # csrc/build.sh 的 --soc 用家族名（$SOC_FAMILY），cmake 用具体型号（$SOC_VERSION）。
+    # ⚠ 若换别的芯片，核对 build_ops.sh 顶部 SOC_FAMILY 的 case 映射是否覆盖。
     echo "==================== [1/2] 算子 vendor 包（单算子 $OPS，csrc/build.sh 直编） ===================="
     (
         set -e
         cd csrc
         rm -rf -- output build_out
-        bash build.sh --pkg --ops="$OPS" --soc="$SOC_VERSION"
+        bash build.sh --pkg --ops="$OPS" --soc="$SOC_FAMILY"
         shopt -s nullglob
         run_installer=(./build/cann-ops-transformer*.run)
         shopt -u nullglob

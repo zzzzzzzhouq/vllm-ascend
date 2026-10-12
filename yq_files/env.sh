@@ -44,11 +44,16 @@ if [ -z "${ASCEND_TOOLKIT_HOME:-}" ]; then
     fi
 fi
 
-# 2) 目标芯片。A3 = ascend910_93。
+# 2) 目标芯片。⚠ 两个消费者要的值不同：
+#    - setup.py 的 cmake（编 .so）要**具体芯片型号**，A3 = ascend910_9391
+#      （CANN host_config.cmake 只认型号，不认家族名）
+#    - csrc/build.sh --soc / build_aclnn.sh 要**家族名** ascend910_93，
+#      它们会自动从 ascend910_9391 映射回去（正则 ^ascend910_93）
+#    所以这里统一导出型号名 ascend910_9391。
 case "${SOC_VERSION:-}" in
     ascend*) echo "[env.sh] SOC_VERSION=$SOC_VERSION（沿用外部导出）" ;;
-    *)       export SOC_VERSION=ascend910_93
-             echo "[env.sh] SOC_VERSION 未导出，默认设为 ascend910_93（A3）" ;;
+    *)       export SOC_VERSION=ascend910_9391
+             echo "[env.sh] SOC_VERSION 未导出，默认设为 ascend910_9391（A3 具体型号）" ;;
 esac
 
 # 3) 自定义算子 vendor 包（build_ops.sh 的产物就装在仓库里）。
