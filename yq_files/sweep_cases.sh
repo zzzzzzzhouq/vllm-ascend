@@ -21,7 +21,7 @@
 #   miss 重的那一端。
 #
 # 覆盖项（环境变量）：
-#   PROCS       进程数，默认 6（串行取中位数，耗时的主项）
+#   PROCS       进程数，默认 5（串行取中位数，耗时的主项）
 #   DEVICES     卡列表，默认 0。**串行只用第一张**；后面几张只有 validate 用
 #   DSA_LOGDIR  日志目录，默认 <repo>/yq_logs
 #   SEQ_LENS    seq 组的 msl 档位，默认 4096,8192,16384,32768,65536
@@ -63,7 +63,7 @@ fi
 
 LOGDIR="${DSA_LOGDIR:-$REPO/yq_logs}"
 mkdir -p "$LOGDIR"
-PROCS="${PROCS:-6}"
+PROCS="${PROCS:-5}"
 STAMP="$(date +%Y%m%d-%H%M%S)-$(git -C "$REPO" rev-parse --short=8 HEAD 2>/dev/null || echo nochash)"
 T0="$(date +%s)"
 

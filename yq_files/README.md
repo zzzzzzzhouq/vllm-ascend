@@ -111,7 +111,7 @@ bash yq_files/sweep_cases.sh seq            # seqlen 曲线 @80%（5 档 msl，S
 或者直接用底层的单条命令（等价于 `hit` 模式，参数含义见下表）：
 
 ```bash
-python3 yq_files/sweep_median.py --processes 6 --e2e --echo -- \
+python3 yq_files/sweep_median.py --processes 5 --e2e --echo -- \
     --batch-size 16 --max-seq-len 65536 --topk 2048 --q-heads 16 \
     --topk-buffer-size 4096 --plan-direct on \
     --warmup 50 --iters 100 --repeat 1 --kernel-time 200 --disable-gc \
@@ -140,7 +140,7 @@ python3 yq_files/sweep_median.py --processes 3 \
 | `--plan-direct on` | 控制区 `[5][6]` 走直接寻址，跟生产一致。关掉会退回块表寻址，那条路上 `slot >= topk` 的命中被静默判成未命中 |
 | `--hit-layout strided` | 碎片化最重的一档。`prefix` 最友好，量出来偏乐观 |
 | `--kernel-time 200` | 出 `KERNEL` 行（判据）。降它不省时间——耗时主项是 profiler 启停 |
-| `--processes 6` | 串行跑 6 个进程取中位数，**这是耗时的主项** |
+| `--processes 5` | 串行跑 5 个进程取中位数，**这是耗时的主项** |
 | `--disable-gc` | Python GC 收持续的税，关掉后 host API 平均耗时降 26~43% |
 
 ## 4. 判据：什么叫「变快了」
