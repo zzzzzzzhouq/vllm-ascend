@@ -114,7 +114,7 @@ bash yq_files/sweep_cases.sh seq            # seqlen 曲线 @80%（5 档 msl，S
 python3 yq_files/sweep_median.py --processes 5 --e2e --echo -- \
     --batch-size 16 --max-seq-len 65536 --topk 2048 --q-heads 16 \
     --topk-buffer-size 4096 --plan-direct on \
-    --warmup 50 --iters 100 --repeat 1 --kernel-time 200 --disable-gc \
+    --warmup 10 --iters 50 --repeat 1 --kernel-time 200 --disable-gc \
     --hit-layout strided --plan-slots off,scattered \
     --hit-ratio 0.0000,0.0500,0.1000,0.1500,0.2000,0.2500,0.3000,0.3500,0.4000,0.4500,0.5000,0.5500,0.6000,0.6500,0.7000,0.7500,0.8000,0.8500,0.9000,0.9500,1.0000,0.0001,0.0499,0.1001,0.1501,0.2001,0.2501,0.2999,0.3501,0.4001,0.4501,0.5001,0.5499,0.6001,0.6501,0.7001,0.7999,0.8501,0.9001,0.9501,0.9999 \
     > 曲线.log 2>&1

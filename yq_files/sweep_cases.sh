@@ -94,7 +94,7 @@ else
 fi
 
 COMMON_TAIL="--topk 2048 --q-heads 16 --topk-buffer-size 4096 --plan-direct on"
-COMMON_TAIL="$COMMON_TAIL --warmup 50 --iters 100 --repeat 1 --kernel-time 200 --disable-gc"
+COMMON_TAIL="$COMMON_TAIL --warmup 10 --iters 50 --repeat 1 --kernel-time 200 --disable-gc"
 COMMON_TAIL="$COMMON_TAIL --hit-layout strided"
 COMMON="--max-seq-len 65536 $COMMON_TAIL"
 PLANS="--plan-slots ${PLAN_AXIS:-off,scattered}"
