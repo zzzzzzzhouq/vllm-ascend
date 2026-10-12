@@ -133,7 +133,13 @@ if ls vllm_ascend/*.so >/dev/null 2>&1; then
     COMPILE_CUSTOM_KERNELS=0 python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
 else
     echo "未发现已有 .so → 首次完整编（内含全量 build_aclnn，需要 catlass 子模块，一次性成本）"
-    python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+    if [ -n "${OPS:-}" ]; then
+        echo "OPS=$OPS → 内部触发的 build_aclnn 也只编该算子（VLLM_ACLNN_OPS），"
+        echo "  绕开与本地 CANN 版本不兼容的其他算子（如 OP_LOGE_FOR_INVALID_* 宏族）"
+        VLLM_ACLNN_OPS="$OPS" python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+    else
+        python3 setup.py build_ext --inplace 2>&1 | tee -a "$BUILD_LOG"
+    fi
 fi
 rc2=${PIPESTATUS[0]}
 

@@ -250,6 +250,16 @@ else
     exit 0
 fi
 
+# 允许用环境变量收窄算子列表（分号分隔），例如：
+#   VLLM_ACLNN_OPS=fused_sparse_attention_overlap bash build_aclnn.sh ...
+# 用途：个别算子依赖比本地 CANN 更新的工具链头文件（如 OP_LOGE_FOR_INVALID_*
+# 需要 log/log.h 里的新宏族）时，只编需要的算子即可绕开。
+if [ -n "${VLLM_ACLNN_OPS:-}" ]; then
+    IFS=';' read -r -a CUSTOM_OPS_ARRAY <<< "${VLLM_ACLNN_OPS}"
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    log "CUSTOM_OPS overridden by VLLM_ACLNN_OPS: ${CUSTOM_OPS}"
+fi
+
 log_selected_ops
 
 

@@ -64,6 +64,12 @@ pip install memfabric_hybrid            # bench 的 CPU KV 池后端
 日志里出现算子名，三样全都骗人（ninja 返回 0 但 vendor 继续用旧 kernel
 的情况真实发生过）。
 
+⚠ **CANN 版本倾斜**：main 分支部分算子（`sparse_flash_mla` 等 25 个文件）
+依赖比 cann-9.0.0 更新的工具链头文件（`log/log.h` 里的 `OP_LOGE_FOR_INVALID_*`
+宏族），全量 build_aclnn 在这类机器上编不过。bench 只需要 fused 算子（不受
+影响），用 `OPS=` 单算子模式即可绕开；必要时也可用
+`VLLM_ACLNN_OPS=算子1;算子2` 手工指定 build_aclnn 的算子列表。
+
 手动等价流程（排查脚本问题时用）：
 
 ```bash
