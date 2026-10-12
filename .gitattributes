@@ -1,4 +1,6 @@
-# shell 脚本统一 LF：blob 本就是 LF，此规则只影响检出行为——
-# 保证 Windows（autocrlf=true）检出的工作副本也是 LF，整目录拷到
-# Linux/NPU 机器时 bash 不会报 $'\r': command not found。
-*.sh text eol=lf
+# 本仓库 .sh blob 为混合行尾：csrc/ 与 yq_files/ 下为 LF，其余（tools/、
+# CI 等）为 CRLF。此处只对构建/测试必经的脚本强制检出为 LF，避免 Windows
+# (autocrlf=true) 检出后整目录拷到 Linux/NPU 机器时 bash 报
+# $'\r': command not found（A3 实测踩过）。其余脚本保持原样不动。
+yq_files/*.sh text eol=lf
+csrc/**/*.sh text eol=lf
