@@ -18,7 +18,7 @@
 | `yq_files/check_contention.py` | 查这趟有没有被别的任务干扰 | 只读日志 |
 | `yq_files/fake_bench.py` | 假 bench，`--bench` 指向它就能空跑验流程，不碰 NPU | 无 |
 | `yq_files/tests/test_fsao_precision.py` | **精度用例**，带 fp32 golden，两种签名都认 | pytest / memfabric_hybrid |
-| `yq_files/env.sh` | 一次 source 就绪：toolkit + `SOC_VERSION`（默认 ascend910_93）+ vendor 路径 | bash |
+| `yq_files/env.sh` | 一次 source 就绪：toolkit + `SOC_VERSION`（默认 ascend910_9391）+ vendor 路径 | bash |
 | `yq_files/build_ops.sh` | 全量编译：算子 vendor 包 + `vllm_ascend_C.so`，编完即可测 | setup.py / CANN |
 
 ⚠ **保持相对位置**：`sweep_median.py` 按 `__file__` 往上两级找
@@ -39,7 +39,7 @@ bench 开头会检查 `ASCEND_CUSTOM_OPP_PATH`，为空直接退出并打印修�
 **一键流程（推荐）**：
 
 ```bash
-source yq_files/env.sh        # toolkit + SOC_VERSION（缺省补 ascend910_93）+ vendor 路径
+source yq_files/env.sh        # toolkit + SOC_VERSION（缺省补 ascend910_9391）+ vendor 路径
 bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
 # 只编本算子（更快，且不需要 catlass 子模块——内网拉不动 gitcode 时用这个）：
 OPS=fused_sparse_attention_overlap bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
