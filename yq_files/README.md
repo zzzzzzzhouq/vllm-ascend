@@ -41,6 +41,8 @@ bench 开头会检查 `ASCEND_CUSTOM_OPP_PATH`，为空直接退出并打印修�
 ```bash
 source yq_files/env.sh        # toolkit + SOC_VERSION（缺省补 ascend910_93）+ vendor 路径
 bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
+# 只编本算子（更快，且不需要 catlass 子模块——内网拉不动 gitcode 时用这个）：
+OPS=fused_sparse_attention_overlap bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
 ```
 
 `build_ops.sh` 做的事 = `python3 setup.py build_aclnn`（编 vendor 算子包并
