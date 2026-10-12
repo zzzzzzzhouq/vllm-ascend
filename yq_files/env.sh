@@ -17,7 +17,17 @@
 #                          （utils.bootstrap_custom_op_env），显式导出是为了
 #                          脱离 vllm_ascend 的裸 torch 脚本也能找到算子。
 
-_dsa_repo="${1:-${DSA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}}"
+_dsa_repo="${1:-${DSA_REPO:-}}"
+if [ -n "$_dsa_repo" ] && [ ! -d "$_dsa_repo" ]; then
+    echo "[env.sh] ⚠ 参数/DSA_REPO 指向的目录不存在: $_dsa_repo —— 忽略"
+    echo "[env.sh]   （可能是同一 shell 里切换克隆后的残留值；需要的话 unset DSA_REPO 重 source）"
+    _dsa_repo=""
+fi
+if [ -z "$_dsa_repo" ]; then
+    _dsa_repo="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+fi
+# ⚠ DSA_REPO 会导出到当前 shell 并长期留存；同一 shell 里切换到别的克隆后，
+#   必须重新 source（或 unset DSA_REPO），否则脚本会继续用旧值。
 export DSA_REPO="$_dsa_repo"
 echo "[env.sh] repo = $_dsa_repo"
 
