@@ -22,9 +22,16 @@
 set -uo pipefail
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
-REPO="${1:-${DSA_REPO:-$_here}}"
-cd "$REPO" || { echo "仓库不存在: $REPO"; exit 1; }
+REPO="${1:-${DSA_REPO:-}}"
+if [ -n "$REPO" ] && [ ! -d "$REPO" ]; then
+    echo "⚠ 参数/DSA_REPO 指向的目录不存在: $REPO"
+    echo "  多半是之前 source env.sh 导出的 DSA_REPO 残留（指向了旧克隆/已改名的目录）。"
+    echo "  改用脚本所在仓库: $_here。如需强制指定：unset DSA_REPO 后重跑，或传显式路径。"
+    REPO=""
+fi
+REPO="${REPO:-$_here}"
 echo "REPO=$REPO"
+cd "$REPO" || exit 1
 
 if [ -z "${SOC_VERSION:-}" ]; then
     export SOC_VERSION=ascend910_93
