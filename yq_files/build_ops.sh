@@ -14,7 +14,9 @@
 #      （source yq_files/env.sh 显式导出是给裸 torch 脚本用的）。
 #
 # 用法：bash yq_files/build_ops.sh 2>&1 | tee /tmp/build_ops.txt
-# 开关：INCREMENTAL=1     跳过删 build（测出来的数字不可信，只用于调编译错误）
+# 开关：OPS=<算子名>    只编单算子（走 csrc/build.sh 直编，绕过 catlass 子模块
+#                       和全量算子列表，快一个数量级；内网拉不动 gitcode 时必用）
+#       INCREMENTAL=1     跳过删 build（测出来的数字不可信，只用于调编译错误）
 #       SKIP_TOUCH=1      跳过 touch 改动过的算子目录
 #       TOUCH_BASE_REF=<ref>  touch 的 git 基准（默认 main）
 set -uo pipefail
@@ -84,9 +86,34 @@ BUILD_LOG="${BUILD_LOG:-/tmp/build_ops_full.log}"
 : > "$BUILD_LOG"
 
 echo
-echo "==================== [1/2] 算子 vendor 包（setup.py build_aclnn） ===================="
-python3 setup.py build_aclnn 2>&1 | tee -a "$BUILD_LOG"
-rc1=${PIPESTATUS[0]}
+if [ -n "${OPS:-}" ]; then
+    # 单算子模式：OPS=fused_sparse_attention_overlap bash yq_files/build_ops.sh
+    # csrc/build.sh 直编 + .run 就地安装。不经过 setup.py build_aclnn，因此
+    # 不会触发 catlass 子模块拉取（内网代理 407 踩过），只编 --ops 指定的算子。
+    # ⚠ --soc 传的是 $SOC_VERSION 本身；ascend910_93 下两者同形。其他芯片若
+    #   SOC_VERSION 与 build.sh 的 --soc 口径不一致，请显式传 OPS 时一并核对。
+    echo "==================== [1/2] 算子 vendor 包（单算子 $OPS，csrc/build.sh 直编） ===================="
+    (
+        set -e
+        cd csrc
+        rm -rf -- output build_out
+        bash build.sh --pkg --ops="$OPS" --soc="$SOC_VERSION"
+        shopt -s nullglob
+        run_installer=(./build/cann-ops-transformer*.run)
+        shopt -u nullglob
+        [ ${#run_installer[@]} -eq 1 ] || { echo "ERROR: 期望 1 个 .run 安装包，实际 ${#run_installer[@]} 个"; exit 1; }
+        chmod +x -- "${run_installer[0]}"
+        "${run_installer[0]}" --install-path="$REPO/vllm_ascend/_cann_ops_custom"
+        if [ -d "$REPO/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/scripts" ]; then
+            chmod u+w "$REPO/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/scripts"
+        fi
+    ) 2>&1 | tee -a "$BUILD_LOG"
+    rc1=${PIPESTATUS[0]}
+else
+    echo "==================== [1/2] 算子 vendor 包（setup.py build_aclnn） ===================="
+    python3 setup.py build_aclnn 2>&1 | tee -a "$BUILD_LOG"
+    rc1=${PIPESTATUS[0]}
+fi
 
 echo
 echo "==================== [2/2] vllm_ascend_C .so（setup.py build_ext --inplace） ===================="
