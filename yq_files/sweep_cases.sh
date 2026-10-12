@@ -3,14 +3,17 @@
 # 从 poolingDSA 的 sweep_up0723.sh 移植：方法论原样保留（A/A 伴生标签、
 # plan 轴同趟轮换、串行固定单卡），去掉写死的卡号与日志目录，新增 seq 组。
 #
-#   bash yq_files/sweep_cases.sh hit      # 命中率曲线 @bs=16，84 点/进程
-#   bash yq_files/sweep_cases.sh hit4     # 命中率曲线 @bs=4， 84 点/进程（helper 主战场）
-#   bash yq_files/sweep_cases.sh bs       # BS 曲线 @80% 命中，32 点/进程
-#   bash yq_files/sweep_cases.sh bs0      # BS 曲线 @0%  命中，32 点/进程
+#   bash yq_files/sweep_cases.sh hit      # 命中率曲线 @bs=16，44 点/进程
+#   bash yq_files/sweep_cases.sh hit4     # 命中率曲线 @bs=4， 44 点/进程（helper 主战场）
+#   bash yq_files/sweep_cases.sh bs       # BS 曲线 @80% 命中，40 点/进程
+#   bash yq_files/sweep_cases.sh bs0      # BS 曲线 @0%  命中，40 点/进程
 #   bash yq_files/sweep_cases.sh seq      # seqlen 曲线 @80% 命中，5 档 msl ×4 点/进程
 #   bash yq_files/sweep_cases.sh frag     # 连续性归因，  16 点/进程
 #   bash yq_files/sweep_cases.sh ablate   # 消融归因单点， 2 点/进程
 #   bash yq_files/sweep_cases.sh validate # 串行 vs 并行是否等价，20 点/进程
+#
+# 覆盖矩阵的环境变量：RATIOS_MAIN / RATIOS_AA（命中率点与 A/A 标签）、
+# AA_LABELS=0（关误差棒）、BS_LIST（batchsize 档位）、SEQ_LENS（msl 档位）
 #
 # ⚠ **前台跑，别加 nohup / &。** 提示符回来 = 跑完了，末尾有横幅。怕 SSH 断用 tmux。
 # ⚠ 跑的过程中别 git pull —— bash 边读边执行脚本文件，改掉会从中间错位。
@@ -73,11 +76,22 @@ if [ "$SMOKE" != "1" ]; then
     fi
 fi
 
-# 命中率的 21 个点：0 到 100%，每 5% 一个；后 21 个是 A/A 复测标签
+# 命中率点：默认 11 点（0→100% 每 10%）；后 11 个是 A/A 伴生标签
 # （round(r*2048) 与对应整点完全相同，只是名字不同、排在队尾，
-#  两次读数的差 = 这趟自己的误差棒。标签必须在小数点后 4 位互不相同）。
-RATIOS_MAIN="0.0000,0.0500,0.1000,0.1500,0.2000,0.2500,0.3000,0.3500,0.4000,0.4500,0.5000,0.5500,0.6000,0.6500,0.7000,0.7500,0.8000,0.8500,0.9000,0.9500,1.0000"
-RATIOS_AA="0.0001,0.0499,0.1001,0.1501,0.2001,0.2501,0.2999,0.3501,0.4001,0.4501,0.5001,0.5499,0.6001,0.6501,0.7001,0.7501,0.7999,0.8501,0.9001,0.9501,0.9999"
+#  两次读数的差 = 这趟自己的误差棒，cmp_sweeps 的显著性门槛由它算出。
+#  ⚠ 标签必须在小数点后 4 位互不相同；加减号按「加 0.0001 后 round 会不会
+#    跳一格」逐个挑的：0.3/0.8 两端用 -0.0001，其余用 +0.0001）。
+# 想换点数用环境变量覆盖：RATIOS_MAIN=... RATIOS_AA=... AA_LABELS=0（关误差棒）
+RATIOS_MAIN="${RATIOS_MAIN:-0.0000,0.1000,0.2000,0.3000,0.4000,0.5000,0.6000,0.7000,0.8000,0.9000,1.0000}"
+RATIOS_AA="${RATIOS_AA:-0.0001,0.1001,0.2001,0.2999,0.4001,0.5001,0.6001,0.7001,0.7999,0.9001,0.9999}"
+# BS 档位（batchsize 组）：默认 10 档。
+BS_LIST="${BS_LIST:-1,2,4,8,12,13,16,32,64,128}"
+AA_LABELS="${AA_LABELS:-1}"
+if [ "$AA_LABELS" = "1" ]; then
+    HIT_RATIO_ARG="$RATIOS_MAIN,$RATIOS_AA"
+else
+    HIT_RATIO_ARG="$RATIOS_MAIN"
+fi
 
 COMMON_TAIL="--topk 2048 --q-heads 16 --topk-buffer-size 4096 --plan-direct on"
 COMMON_TAIL="$COMMON_TAIL --warmup 50 --iters 100 --repeat 1 --kernel-time 200 --disable-gc"
@@ -97,48 +111,48 @@ fi
 case "$MODE" in
   hit)
     LOG="$LOGDIR/case_hit_curve_$STAMP.log"
-    echo "命中率曲线：21 点 × 2 条路 × 2 标签 = 84 点/进程 × $PROCS 进程（$WHERE）"
+    echo "命中率曲线：11 点 × 2 条路 × 2 标签 = 44 点/进程 × $PROCS 进程（$WHERE）"
     echo "日志 $LOG"
     echo "开始 $(date '+%H:%M:%S')"
     # shellcheck disable=SC2086
     python3 yq_files/sweep_median.py --processes "$PROCS" --e2e --echo "${PAR_ARGS[@]}" "${BENCH_ARG[@]}" -- \
-        --batch-size 16 $COMMON $PLANS --hit-ratio "$RATIOS_MAIN,$RATIOS_AA" > "$LOG" 2>&1
+        --batch-size 16 $COMMON $PLANS --hit-ratio "$HIT_RATIO_ARG" > "$LOG" 2>&1
     RC=$?
     ;;
   hit4)
     LOG="$LOGDIR/case_hit4_curve_$STAMP.log"
-    echo "命中率曲线 @ bs=4：21 点 × 2 条路 × 2 标签 = 84 点/进程 × $PROCS 进程（$WHERE）"
+    echo "命中率曲线 @ bs=4：11 点 × 2 条路 × 2 标签 = 44 点/进程 × $PROCS 进程（$WHERE）"
     echo "日志 $LOG"
     echo "开始 $(date '+%H:%M:%S')"
     # 与 hit 只差 batch size。bs=16 时 24 核已用满，「用上空闲核」（helper）收益
     # 恒为零 —— bs=16 那条是零对照臂（必须平），bs≤8 这条才是战场。
     # shellcheck disable=SC2086
     python3 yq_files/sweep_median.py --processes "$PROCS" --e2e --echo "${PAR_ARGS[@]}" "${BENCH_ARG[@]}" -- \
-        --batch-size 4 $COMMON $PLANS --hit-ratio "$RATIOS_MAIN,$RATIOS_AA" > "$LOG" 2>&1
+        --batch-size 4 $COMMON $PLANS --hit-ratio "$HIT_RATIO_ARG" > "$LOG" 2>&1
     RC=$?
     ;;
   bs)
     LOG="$LOGDIR/case_bs_curve_$STAMP.log"
-    echo "BS 曲线：8 个 bs × 2 条路 × 2 标签 = 32 点/进程 × $PROCS 进程（$WHERE）"
+    echo "BS 曲线：10 个 bs × 2 条路 × 2 标签 = 40 点/进程 × $PROCS 进程（$WHERE）"
     echo "日志 $LOG"
     echo "开始 $(date '+%H:%M:%S')"
     # 命中率固定 80%（标量受限那一端）。0.7999 与 0.8000 的 round(r*2048) 都是
     # 1638，是真正的 A/A。
     # shellcheck disable=SC2086
     python3 yq_files/sweep_median.py --processes "$PROCS" --e2e --echo "${PAR_ARGS[@]}" "${BENCH_ARG[@]}" -- \
-        --batch-size 1,2,4,8,16,32,64,128 $COMMON $PLANS --hit-ratio 0.8000,0.7999 > "$LOG" 2>&1
+        --batch-size "$BS_LIST" $COMMON $PLANS --hit-ratio 0.8000,0.7999 > "$LOG" 2>&1
     RC=$?
     ;;
   bs0)
     LOG="$LOGDIR/case_bs0_curve_$STAMP.log"
-    echo "BS 曲线 @ 0% 命中：8 个 bs × 2 条路 × 2 标签 = 32 点/进程 × $PROCS 进程（$WHERE）"
+    echo "BS 曲线 @ 0% 命中：10 个 bs × 2 条路 × 2 标签 = 40 点/进程 × $PROCS 进程（$WHERE）"
     echo "日志 $LOG"
     echo "开始 $(date '+%H:%M:%S')"
     # 固定 0%（搬运受限那一端，AIV MTE2 占 79%）—— 判「用上空闲核能快多少」
     # 必须看这条。round(0.0001*2048)=0 与 0.0000 同为 miss=2048，是真正的 A/A。
     # shellcheck disable=SC2086
     python3 yq_files/sweep_median.py --processes "$PROCS" --e2e --echo "${PAR_ARGS[@]}" "${BENCH_ARG[@]}" -- \
-        --batch-size 1,2,4,8,16,32,64,128 $COMMON $PLANS --hit-ratio 0.0000,0.0001 > "$LOG" 2>&1
+        --batch-size "$BS_LIST" $COMMON $PLANS --hit-ratio 0.0000,0.0001 > "$LOG" 2>&1
     RC=$?
     ;;
   seq)

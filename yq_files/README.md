@@ -98,12 +98,15 @@ pip install memfabric_hybrid   # 或按机器已有安装方式
 
 ```bash
 SMOKE=1 bash yq_files/sweep_cases.sh hit    # 先空跑验流程（秒回，不碰 NPU）
-bash yq_files/sweep_cases.sh hit            # 命中率曲线 @bs=16（84 点/进程）
+bash yq_files/sweep_cases.sh hit            # 命中率曲线 @bs=16（11 点+11 A/A 标签）
 bash yq_files/sweep_cases.sh hit4           # 命中率曲线 @bs=4（helper 机制主战场）
-bash yq_files/sweep_cases.sh bs             # BS 曲线 @80% 命中
+bash yq_files/sweep_cases.sh bs             # BS 曲线 @80% 命中（1~128 十档）
 bash yq_files/sweep_cases.sh bs0            # BS 曲线 @0% 命中（搬运受限端）
 bash yq_files/sweep_cases.sh seq            # seqlen 曲线 @80%（5 档 msl，SEQ_LENS 可覆盖）
 ```
+
+矩阵可用环境变量覆盖：`RATIOS_MAIN`/`RATIOS_AA`（命中率点与 A/A 标签）、
+`AA_LABELS=0`（关 A/A，省一半时间但失去显著性门槛）、`BS_LIST`、`SEQ_LENS`。
 
 或者直接用底层的单条命令（等价于 `hit` 模式，参数含义见下表）：
 
