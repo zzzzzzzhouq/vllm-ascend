@@ -193,8 +193,9 @@ plan_slots、--kernel-time。要跟自己的优化比，**基线也得用同样�
   `env.sh`/`build_ops.sh` 是原仓库同名脚本的去容器化改写（写死的容器路径、
   memfabric/atb 段去掉，SOC_VERSION 兜底补 ascend910_93，编译入口换成
   build_aclnn + build_ext 两步）。
-- bench 开头指向的精度用例路径改为本仓库的
-  `tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py`。
+- 精度门禁只用 `yq_files/tests/test_fsao_precision.py`（fp32 golden，101 用例）；
+  本仓库 `tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py`
+  是可选补充，不作为门禁（其 e2e conftest 依赖 modelscope 等额外包）。
 - 其余（bench 主体、sweep_median、cmp_sweeps、fake_bench、check_contention、
   精度用例）与 `happy-math/yq/opt-all0908` 逐字节一致。
 - 本仓库算子 schema 为 15 参（含 `selection_membership_map`、无 `timer`），
