@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# 一次 source 就绪：CANN toolkit + 目标芯片 + 本仓库自定义算子 vendor 包。
-# （原仓库 env.sh 写死了容器路径、还带 memfabric/atb 段，与本仓库无关，未照搬。）
+# 一次 source 就绪：CANN toolkit + 目标芯片 + memfabric offload + 本仓库自定义算子 vendor 包。
+# （原仓库 env.sh 写死了容器路径；atb 段与本仓库无关未照搬，memfabric 段保留——
+#   bench / 精度用例的 CPU KV 池走 offload.empty，缺了必报
+#   "offload launch load library failed" 并挂死。）
 #
 # 用法：
 #   source yq_files/env.sh                      # 自动定位仓库（脚本上一级）
@@ -9,10 +11,13 @@
 #
 # 幂等：重复 source 不会把路径变量越堆越长。
 #
-# 三段缺一不可：
+# 四段缺一不可：
 #   - ascend-toolkit     : CANN 编译/运行时
 #   - SOC_VERSION        : 本仓库 setup.py **不自动探测**，缺了 build_aclnn
 #                          会静默跳过整个算子编译（只编 .so，看不出异常）
+#   - memfabric          : offload 库扩展路径（MEMFABRIC_HYBRID_EXTEND_LIB_PATH），
+#                          缺了 offload.initialize 报 "offload launch load library
+#                          failed" 后静默挂死（2026-10-19 A3 实测）
 #   - ASCEND_CUSTOM_OPP_PATH : vendor 包路径。vllm_ascend import 时也会自动补
 #                          （utils.bootstrap_custom_op_env），显式导出是为了
 #                          脱离 vllm_ascend 的裸 torch 脚本也能找到算子。
@@ -80,4 +85,32 @@ if [ -d "$_dsa_vendor" ]; then
     esac
 else
     echo "[env.sh] ⚠ $_dsa_vendor 不存在 —— 算子还没编？先跑 bash yq_files/build_ops.sh"
+fi
+
+# 4) memfabric offload 扩展库路径。yq 原版必 source 的一段，去容器化时误删，
+#    A3 实测缺了它：offload.initialize 打一行
+#    "[OFFLOAD acc_offload_local_dram_entry.cpp:69 Initialize] offload launch
+#     load library failed" 然后无输出挂死。
+#    常规安装：/usr/local/memfabric_hybrid/set_env.sh；pip 安装兜底：从包目录找。
+if [ -z "${MEMFABRIC_HYBRID_EXTEND_LIB_PATH:-}" ]; then
+    _dsa_mf_setenv="/usr/local/memfabric_hybrid/set_env.sh"
+    if [ ! -f "$_dsa_mf_setenv" ]; then
+        _dsa_mf_root="$(python3 -c 'import memfabric_hybrid, os; print(os.path.dirname(os.path.dirname(os.path.abspath(memfabric_hybrid.__file__))))' 2>/dev/null || true)"
+        if [ -n "$_dsa_mf_root" ]; then
+            _dsa_mf_found="$(find "$_dsa_mf_root" -maxdepth 3 -name set_env.sh 2>/dev/null | head -1)"
+            [ -n "$_dsa_mf_found" ] && _dsa_mf_setenv="$_dsa_mf_found"
+        fi
+    fi
+    if [ -f "$_dsa_mf_setenv" ]; then
+        _dsa_had_u=0; case "$-" in *u*) _dsa_had_u=1; set +u ;; esac
+        source "$_dsa_mf_setenv"
+        [ "$_dsa_had_u" = 1 ] && set -u
+        echo "[env.sh] sourced memfabric set_env.sh（MEMFABRIC_HYBRID_EXTEND_LIB_PATH=${MEMFABRIC_HYBRID_EXTEND_LIB_PATH:-该脚本没设这个变量}）"
+    else
+        echo "[env.sh] ⚠ 没找到 memfabric set_env.sh（/usr/local/memfabric_hybrid 和 pip 包里都没有）"
+        echo "[env.sh]   offload.initialize 会报 'offload launch load library failed' 并挂死。"
+        echo "[env.sh]   修法：pip show memfabric_hybrid 确认装了；把包内 lib 目录手动 export 进 MEMFABRIC_HYBRID_EXTEND_LIB_PATH"
+    fi
+else
+    echo "[env.sh] memfabric EXTEND_LIB_PATH=${MEMFABRIC_HYBRID_EXTEND_LIB_PATH}"
 fi
