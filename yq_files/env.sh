@@ -21,6 +21,11 @@
 #   - ASCEND_CUSTOM_OPP_PATH : vendor 包路径。vllm_ascend import 时也会自动补
 #                          （utils.bootstrap_custom_op_env），显式导出是为了
 #                          脱离 vllm_ascend 的裸 torch 脚本也能找到算子。
+#   - PYTHONPATH         : 仓库前置。bench / 精度用例 import
+#                          vllm_ascend.vllm_ascend_C（op 的 torch_binding 层）
+#                          和 vllm_ascend.utils；机器上另装有 pip 版 vllm-ascend
+#                          时不前置就会解析到别的包（yq 教训：一直用错包，
+#                          白量一轮基线）。
 
 _dsa_repo="${1:-${DSA_REPO:-}}"
 if [ -n "$_dsa_repo" ] && [ ! -d "$_dsa_repo" ]; then
@@ -114,3 +119,13 @@ if [ -z "${MEMFABRIC_HYBRID_EXTEND_LIB_PATH:-}" ]; then
 else
     echo "[env.sh] memfabric EXTEND_LIB_PATH=${MEMFABRIC_HYBRID_EXTEND_LIB_PATH}"
 fi
+
+# 5) PYTHONPATH 仓库前置（yq 原版第 143 行，去容器化时同样误删）。
+#    按解析后的真实路径去重：同仓库多路径/符号链接只留第一次出现的写法，
+#    重复 source 不堆叠。
+_dsa_repo_real="$(cd "$_dsa_repo" 2>/dev/null && pwd -P)"
+case ":${PYTHONPATH:-}:" in
+    *":$_dsa_repo_real:"*) ;;
+    *) export PYTHONPATH="$_dsa_repo_real${PYTHONPATH:+:$PYTHONPATH}"
+       echo "[env.sh] PYTHONPATH 前置仓库 = $_dsa_repo_real" ;;
+esac
