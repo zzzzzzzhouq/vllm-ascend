@@ -136,3 +136,22 @@ case ":${PYTHONPATH:-}:" in
     *) export PYTHONPATH="$_dsa_repo_real${PYTHONPATH:+:$PYTHONPATH}"
        echo "[env.sh] PYTHONPATH 前置仓库 = $_dsa_repo_real" ;;
 esac
+
+# 6) memlock 上限。MemFabric 的 offload 池是 pinned 宿主机内存（给 NPU DMA），
+#    受 ulimit -l 限制。默认 64 MiB 时 6 GiB 池必挂：
+#    "HalMemSetAccess failed: 65534 / alloc local host mem failed"（2026-10-21 实测）。
+#    这里尽力抬到 unlimited；抬不动就给明确提示（root 可 ulimit -l unlimited，
+#    或用 DSA_DRAM_POOL_GB 调小池——精度用例 3 GiB 就够）。
+if [ "$(ulimit -l)" != "unlimited" ]; then
+    _dsa_lk="$(ulimit -l)"
+    ulimit -l unlimited 2>/dev/null || true
+    if [ "$(ulimit -l)" = "unlimited" ]; then
+        echo "[env.sh] ulimit -l 由 ${_dsa_lk} KB 提升为 unlimited（MemFabric 池需要）"
+    else
+        echo "[env.sh] ⚠ ulimit -l 仍是 $(ulimit -l) KB —— 6 GiB 的 MemFabric 池会申请失败"
+        echo "[env.sh]   处理：ulimit -l unlimited（root）或改 /etc/security/limits.conf；"
+        echo "[env.sh]   或调小池：DSA_DRAM_POOL_GB=3 pytest ...（精度用例 1.2 GiB 峰值）"
+    fi
+else
+    echo "[env.sh] ulimit -l = unlimited"
+fi
