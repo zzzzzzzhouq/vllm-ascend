@@ -122,10 +122,12 @@ _DRAM_POOL_GB = float(os.environ.get("DSA_DRAM_POOL_GB", "6"))
 
 # CPU/host KV 后端：
 #   offload（默认）= MemFabric offload.empty + 2MiB 对齐（生产同路径）
-#   pinned         = 纯 pinned 宿主内存（torch.empty(pin_memory=True)），不经过
-#                    MemFabric/HAL。宿主上 MemFabric 池起不来时（HYBM 的
-#                    HalMemSetAccess 失败）用它，算子语义不变——它只需要钉住的
-#                    宿主 KV，不需要池本身。
+#   swap_memory    = torch_npu.empty_with_swapped_memory：宿主内存但**映射进
+#                    NPU 地址空间**，kernel 的 MTE 才能读。宿主上 MemFabric 池
+#                    起不来时的替代（HYBM HalMemSetAccess 失败）。
+# ⚠ 普通 pinned 内存（torch.empty(pin_memory=True)）**不能用**：它没有映射进
+#    设备地址空间，kernel 一读就 "DDR address of the MTE instruction is out of
+#    range" + aicore exception（2026-10-21 实测，会连带把同进程后续 kernel 全搞挂）。
 _CPU_KV_BACKEND = os.environ.get("DSA_CPU_KV_BACKEND", "offload").strip().lower()
 
 # selection_membership_map row stride, mirroring the kernel constants in
@@ -172,13 +174,20 @@ def _empty_pinned_cpu_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tens
     pinned host memory (no MemFabric/HAL involvement).
     """
     nbytes = int(np.prod(shape)) * torch.empty((), dtype=dtype).element_size()
-    if _CPU_KV_BACKEND == "pinned":
-        raw = torch.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
+    if _CPU_KV_BACKEND == "swap_memory":
+        if not hasattr(torch_npu, "empty_with_swapped_memory"):
+            raise RuntimeError(
+                "DSA_CPU_KV_BACKEND=swap_memory but torch_npu.empty_with_swapped_memory is unavailable"
+            )
+        # Host memory mapped into the NPU address space: kernel MTE can read it.
+        raw = torch_npu.empty_with_swapped_memory(
+            [nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8
+        )
     elif _CPU_KV_BACKEND == "offload":
         raw = offload.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
     else:
         raise RuntimeError(
-            f"unknown DSA_CPU_KV_BACKEND={_CPU_KV_BACKEND!r} (use 'offload' or 'pinned')"
+            f"unknown DSA_CPU_KV_BACKEND={_CPU_KV_BACKEND!r} (use 'offload' or 'swap_memory')"
         )
     return _align_memory(raw, _CPU_CACHE_ALIGNMENT)[:nbytes].view(dtype).view(shape)
 
