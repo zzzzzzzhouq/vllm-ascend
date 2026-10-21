@@ -215,6 +215,16 @@ def offload_pool():
         offload.uninitialize()
 
 
+def _host_kv_ref(case: dict, key: str) -> torch.Tensor:
+    """CPU-side reference view of a host KV tensor.
+
+    swap_memory 的宿主 KV 在 CPU 侧不可读（读取会段错误），因此给它留了一份
+    影子副本；offload 后端没有影子，直接用原张量。
+    """
+    shadow = case.get(f"{key}_shadow")
+    return shadow if shadow is not None else case[key]
+
+
 def _build_case(
     topk: int,
     q_heads: int,
@@ -266,8 +276,17 @@ def _build_case(
     # baseline trivially zero and hide any fetch bug.
     full_kv = _empty_pinned_cpu_tensor([full_blocks, _BLOCK_SIZE, _KVD], dtype)
     full_rope = _empty_pinned_cpu_tensor([full_blocks, _BLOCK_SIZE, _KRD], dtype)
-    full_kv.copy_(torch.randn(full_kv.shape, dtype=torch.float32).to(dtype))
-    full_rope.copy_(torch.randn(full_rope.shape, dtype=torch.float32).to(dtype))
+    full_kv_shadow = full_rope_shadow = None
+    if _CPU_KV_BACKEND == "swap_memory":
+        # swapped 张量：CPU→swapped 的 copy_ 会段错误（实测 2026-10-21），
+        # 只能 NPU→swapped；同时 CPU 侧读不了它的内容，所以留一份影子供 golden。
+        full_kv_shadow = torch.randn(full_kv.shape, dtype=torch.float32).to(dtype)
+        full_rope_shadow = torch.randn(full_rope.shape, dtype=torch.float32).to(dtype)
+        full_kv.copy_(full_kv_shadow.to("npu"))
+        full_rope.copy_(full_rope_shadow.to("npu"))
+    else:
+        full_kv.copy_(torch.randn(full_kv.shape, dtype=torch.float32).to(dtype))
+        full_rope.copy_(torch.randn(full_rope.shape, dtype=torch.float32).to(dtype))
 
     # Identity block table: physical block id == logical block id.
     full_bt = torch.arange(full_blocks, dtype=torch.int32, device="npu").unsqueeze(0).expand(bsz, -1).contiguous()
@@ -308,6 +327,8 @@ def _build_case(
         "query": query,
         "full_kv": full_kv,
         "full_rope": full_rope,
+        "full_kv_shadow": full_kv_shadow,
+        "full_rope_shadow": full_rope_shadow,
         "full_bt": full_bt,
         "actual_q": actual_q,
         "actual_k": actual_k,
@@ -435,8 +456,8 @@ def _golden(case: dict) -> torch.Tensor:
 
     q_nope = query[..., :_KVD].float().cpu()
     q_rope = query[..., _KVD:].float().cpu()
-    kv_flat = case["full_kv"].reshape(-1, _KVD).float()
-    rope_flat = case["full_rope"].reshape(-1, _KRD).float()
+    kv_flat = _host_kv_ref(case, "full_kv").reshape(-1, _KVD).float()
+    rope_flat = _host_kv_ref(case, "full_rope").reshape(-1, _KRD).float()
     topk_flat = case["topk_indices"].reshape(num_tokens, -1).cpu()
 
     outputs = []
@@ -783,8 +804,8 @@ def _expected_selection_cache(
 
     exp_kv = kv_before.reshape(-1, _KVD).clone()
     exp_rope = rope_before.reshape(-1, _KRD).clone()
-    exp_kv[dst_moved] = case["full_kv"].reshape(-1, _KVD)[src_row[moved]]
-    exp_rope[dst_moved] = case["full_rope"].reshape(-1, _KRD)[src_row[moved]]
+    exp_kv[dst_moved] = _host_kv_ref(case, "full_kv").reshape(-1, _KVD)[src_row[moved]]
+    exp_rope[dst_moved] = _host_kv_ref(case, "full_rope").reshape(-1, _KRD)[src_row[moved]]
     return (
         exp_kv.reshape(kv_before.shape),
         exp_rope.reshape(rope_before.shape),
