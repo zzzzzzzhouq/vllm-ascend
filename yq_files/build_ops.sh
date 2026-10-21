@@ -55,6 +55,32 @@ if [ -z "${SOC_VERSION:-}" ]; then
 fi
 echo "SOC_VERSION=$SOC_VERSION"
 
+# ⚠ SOC_VERSION 有两个消费者，值不一样（2026-10-21 A3 踩过）：
+#   - cmake（setup.py 编 .so，CANN 的 host_config.cmake）只认**具体型号**
+#     （ascend910_9382 等），传家族名 ascend910_93 直接报
+#     "SOC_VERSION ascend910_93 does not support"
+#   - csrc/build.sh --soc 要**家族名**（由下面的 case 从型号推导）
+# 外部 shell 残留家族名时，这里自动用 npu-smi 换成具体型号；换不了就报错退出。
+case "$SOC_VERSION" in
+    ascend910_93|ascend910b|ascend310p|ascend950)
+        if command -v npu-smi >/dev/null 2>&1; then
+            _c="$(npu-smi info -m 2>/dev/null | awk -F': ' '/Chip Name/{print $2; exit}' | tr 'A-Z' 'a-z')"
+            _n="$(npu-smi info -m 2>/dev/null | awk -F': ' '/NPU Name/{print $2; exit}' | tr 'A-Z' 'a-z')"
+        else
+            _c=""; _n=""
+        fi
+        if [ -n "$_c" ] && [ -n "$_n" ]; then
+            echo "⚠ SOC_VERSION=$SOC_VERSION 是家族名（cmake 不认），已改用 npu-smi 识别的 ${_c}_${_n}"
+            export SOC_VERSION="${_c}_${_n}"
+        else
+            echo "❌ SOC_VERSION=$SOC_VERSION 是家族名，cmake 只认具体型号；npu-smi 也没识别出来。"
+            echo "   请 export SOC_VERSION=<具体型号>（A3=ascend910_9382，A2=ascend910b1）后重跑"
+            exit 1
+        fi
+        ;;
+esac
+echo "SOC_VERSION(具体型号,cmake 用)=$SOC_VERSION"
+
 # csrc/build.sh 的 --soc 要家族名（ascend910_93），从具体型号推导：
 case "$SOC_VERSION" in
     ascend910_93*) SOC_FAMILY=ascend910_93 ;;

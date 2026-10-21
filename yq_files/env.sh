@@ -78,6 +78,13 @@ if [ -z "${SOC_VERSION:-}" ]; then
     fi
 else
     echo "[env.sh] SOC_VERSION=$SOC_VERSION（沿用外部导出）"
+    case "$SOC_VERSION" in
+        ascend910_93|ascend910b|ascend310p|ascend950)
+            echo "[env.sh] ⚠ 这是家族名：csrc/build.sh --soc 认它，但 setup.py 的 cmake"
+            echo "[env.sh]   只认具体型号（A3=ascend910_9382）。build_ops.sh 会自动纠正，"
+            echo "[env.sh]   想手动改就 unset SOC_VERSION 后重 source。"
+            ;;
+    esac
 fi
 
 # 3) 自定义算子 vendor 包（build_ops.sh 的产物就装在仓库里）。
