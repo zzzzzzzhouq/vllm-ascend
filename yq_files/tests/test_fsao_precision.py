@@ -118,7 +118,7 @@ _GIB = 1024 * 1024 * 1024
 # anything back between cases, against a pool that used to be 2.0 GiB -- too
 # close to the edge to leave alone. Raised with the arithmetic written down so
 # the next person adding cases can redo it rather than guess.
-_DRAM_POOL_GB = 6.0
+_DRAM_POOL_GB = float(os.environ.get("DSA_DRAM_POOL_GB", "6"))
 
 # selection_membership_map row stride, mirroring the kernel constants in
 # fused_sparse_attention_overlap_service_vector_mla.h:
