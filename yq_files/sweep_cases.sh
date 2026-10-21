@@ -96,7 +96,13 @@ fi
 COMMON_TAIL="--topk 2048 --q-heads 16 --topk-buffer-size 4096 --plan-direct on"
 COMMON_TAIL="$COMMON_TAIL --warmup 10 --iters 50 --repeat 1 --kernel-time 200 --disable-gc"
 COMMON_TAIL="$COMMON_TAIL --hit-layout strided"
+# CPU/host KV 后端：两个臂必须一致，否则 A/B 不成立。
+#   offload（默认）= MemFabric 池；swap_memory = torch_npu swapped 宿主内存
+#   （宿主上 MemFabric/HYBM 起不来时用，见 README 的排障节）
+CPU_KV_BACKEND="${DSA_CPU_KV_BACKEND:-offload}"
+COMMON_TAIL="$COMMON_TAIL --cpu-kv-backend $CPU_KV_BACKEND"
 COMMON="--max-seq-len 65536 $COMMON_TAIL"
+echo "CPU KV 后端: $CPU_KV_BACKEND（基线与优化两臂必须用同一个值）"
 PLANS="--plan-slots ${PLAN_AXIS:-off,scattered}"
 
 PAR_ARGS=()
