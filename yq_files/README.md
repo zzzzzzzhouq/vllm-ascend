@@ -187,6 +187,35 @@ plan_slots、--kernel-time。要跟自己的优化比，**基线也得用同样�
 | 精度用例挂了 | 先看是不是只挂 `slots=4096` 那一半——比性能问题重要得多 |
 | bench 直接报错 | ⚠ `full_q_actual_seq` 必须填**累加值**（旁边的 `full_kv_actual_seq` 反而不累加）。填错不报错，静默只算 1 个请求、只用 1 个核。bench 里有断言 |
 
+### 6.1 宿主 MemFabric 起不来时：换 `swap_memory` 后端
+
+症状（2026-10-21 在 A3 上实测）：
+
+```
+HYBM ... HalMemSetAccess failed: 65534
+OFFLOAD ... alloc local host mem failed, size: 1073741824
+```
+
+池子压到 0.06 GiB 也没用——HYBM 的段按 **1 GiB 最小粒度**分配，且 `ulimit -l unlimited`
+也不解决，说明是 HAL/驱动层访问失败，与池大小无关。此时换后端：
+
+```bash
+export DSA_CPU_KV_BACKEND=swap_memory      # 精度 + 性能两个脚本都认
+bash yq_files/precision_small.sh
+DSA_CPU_KV_BACKEND=swap_memory bash yq_files/sweep_cases.sh hit
+```
+
+三条硬约束（都已在脚本/测试里处理，换新代码时别踩回去）：
+
+1. 宿主 KV 必须**映射进 NPU 地址空间**，kernel 的 MTE 才能读。普通 pinned
+   （`torch.empty(pin_memory=True)`）不行，会 `DDR address of the MTE instruction
+   is out of range` + aicore exception，并污染同进程后续所有 kernel。
+2. swapped 张量**不能做 CPU→swapped 的 `copy_`**（段错误）：数据要在 NPU 上生成再拷入；
+   CPU 侧也读不了，golden 计算要用影子副本。
+3. swapped 张量**不要 slice/view/`zero_()`**（部分构建段错误）：按最终 shape/dtype 直接分配。
+
+⚠ A/B 成立的前提：基线与优化两臂用**同一个** `DSA_CPU_KV_BACKEND`。
+
 ## 7. 与原仓库（poolingDSA）的差别
 
 - 环境准备换成 vllm-ascend 上游的 `setup.py build_aclnn` vendor 包流程；
