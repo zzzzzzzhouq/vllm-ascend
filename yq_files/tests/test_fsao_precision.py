@@ -179,10 +179,10 @@ def _empty_pinned_cpu_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tens
             raise RuntimeError(
                 "DSA_CPU_KV_BACKEND=swap_memory but torch_npu.empty_with_swapped_memory is unavailable"
             )
-        # Host memory mapped into the NPU address space: kernel MTE can read it.
-        raw = torch_npu.empty_with_swapped_memory(
-            [nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8
-        )
+        # 直接按目标 shape/dtype 分配：不做切片、不做 view、不手工对齐。
+        # 该分配器返回的指针本身就是 2 MiB 对齐（实测 align_off=0），而
+        # swapped 张量上的 slice/view 在部分 torch_npu 构建上会段错误。
+        return torch_npu.empty_with_swapped_memory(list(shape), dtype=dtype, device="npu")
     elif _CPU_KV_BACKEND == "offload":
         raw = offload.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
     else:
