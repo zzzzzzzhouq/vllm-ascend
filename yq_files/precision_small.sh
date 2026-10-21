@@ -25,6 +25,9 @@ if [ -z "${ASCEND_CUSTOM_OPP_PATH:-}" ]; then
 fi
 
 export DSA_DRAM_POOL_GB="${DSA_DRAM_POOL_GB:-0.06}"
+# 宿主 MemFabric 池起不来（HYBM HalMemSetAccess 65534）时用 pinned：
+# 纯 pinned 宿主内存，不经过 MemFabric/HAL，算子语义不变。
+export DSA_CPU_KV_BACKEND="${DSA_CPU_KV_BACKEND:-pinned}"
 ulimit -l unlimited 2>/dev/null || true
 
 K="${PREC_K:-not baseline_batch_sizes and not baseline_hit_ratios}"
@@ -36,6 +39,7 @@ LOG="$LOGDIR/precision_small_$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD
 echo "==================================================================="
 echo " 小内存精度门禁"
 echo "   池大小      : ${DSA_DRAM_POOL_GB} GiB（64 MiB 限制内）"
+echo "   KV 后端     : ${DSA_CPU_KV_BACKEND}（pinned = 不经 MemFabric）"
 echo "   memlock     : $(ulimit -l) KB"
 echo "   用例筛选    : -k '$K'"
 echo "   日志        : $LOG"

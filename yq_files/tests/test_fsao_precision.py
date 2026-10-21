@@ -120,6 +120,14 @@ _GIB = 1024 * 1024 * 1024
 # the next person adding cases can redo it rather than guess.
 _DRAM_POOL_GB = float(os.environ.get("DSA_DRAM_POOL_GB", "6"))
 
+# CPU/host KV 后端：
+#   offload（默认）= MemFabric offload.empty + 2MiB 对齐（生产同路径）
+#   pinned         = 纯 pinned 宿主内存（torch.empty(pin_memory=True)），不经过
+#                    MemFabric/HAL。宿主上 MemFabric 池起不来时（HYBM 的
+#                    HalMemSetAccess 失败）用它，算子语义不变——它只需要钉住的
+#                    宿主 KV，不需要池本身。
+_CPU_KV_BACKEND = os.environ.get("DSA_CPU_KV_BACKEND", "offload").strip().lower()
+
 # selection_membership_map row stride, mirroring the kernel constants in
 # fused_sparse_attention_overlap_service_vector_mla.h:
 #   MEMBERSHIP_MAX_TOKEN / MAP_INT16_COUNT = 16376
@@ -159,16 +167,29 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
 def _empty_pinned_cpu_tensor(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
     """Allocate host KV the same way KVOffloadDecodeManager does.
 
-    Raw int8 bytes from MemFabric, 2MiB-aligned, then viewed as ``dtype``.
+    Raw int8 bytes, 2MiB-aligned, then viewed as ``dtype``. Source depends on
+    ``DSA_CPU_KV_BACKEND``: MemFabric ``offload.empty`` (default) or plain
+    pinned host memory (no MemFabric/HAL involvement).
     """
     nbytes = int(np.prod(shape)) * torch.empty((), dtype=dtype).element_size()
-    raw = offload.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
+    if _CPU_KV_BACKEND == "pinned":
+        raw = torch.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
+    elif _CPU_KV_BACKEND == "offload":
+        raw = offload.empty([nbytes + _CPU_CACHE_ALIGNMENT], dtype=torch.int8, pin_memory=True)
+    else:
+        raise RuntimeError(
+            f"unknown DSA_CPU_KV_BACKEND={_CPU_KV_BACKEND!r} (use 'offload' or 'pinned')"
+        )
     return _align_memory(raw, _CPU_CACHE_ALIGNMENT)[:nbytes].view(dtype).view(shape)
 
 
 @pytest.fixture(scope="module")
 def offload_pool():
     """Bring up the MemFabric CPU KV pool for the whole module."""
+    if _CPU_KV_BACKEND != "offload":
+        print(f"CPU_KV_BACKEND={_CPU_KV_BACKEND}: skip MemFabric pool init", flush=True)
+        yield
+        return
     config = offload.OffloadConfig()
     config.device_id = torch_npu.npu.current_device()
     config.size = int(_DRAM_POOL_GB * _GIB)

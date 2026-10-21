@@ -83,7 +83,7 @@ empty_swapped = getattr(torch_npu, "empty_with_swapped_memory", None)
 _OP_SCHEMA = str(fused.default._schema)
 _OP_TAKES_MEMBERSHIP = "selection_membership_map" in _OP_SCHEMA
 
-CpuKvBackend = Literal["offload", "swap_memory"]
+CpuKvBackend = Literal["offload", "swap_memory", "pinned"]
 
 
 def _scratch_dir(prefix: str) -> str:
@@ -254,6 +254,25 @@ def recommended_dram_size_gb(max_seq_len: int, block_size: int = _BLOCK_SIZE) ->
     return math.ceil((need_bytes / _GIB + 1.0) * 2) / 2.0
 
 
+def _empty_aligned_host_tensor_pinned(
+    shape: list[int],
+    dtype: torch.dtype,
+    alignment: int = _CPU_CACHE_ALIGNMENT,
+) -> torch.Tensor:
+    """Pinned host memory without MemFabric.
+
+    Same contract as ``_empty_aligned_cpu_tensor`` (raw int8 + 2MiB align +
+    view) but allocated by torch_npu's host allocator. Used when the MemFabric
+    offload pool is unavailable on the host (e.g. HYBM HalMemSetAccess fails):
+    the fused op only needs pinned host KV, not the pool itself.
+    """
+    num_elements = int(np.prod(shape))
+    nbytes = num_elements * torch.empty((), dtype=dtype).element_size()
+    raw = torch.empty([nbytes + alignment], dtype=torch.int8, pin_memory=True)
+    aligned = _align_memory(raw, alignment)[:nbytes]
+    return aligned.view(dtype).view(shape)
+
+
 def _alloc_cpu_kv_tensor(
     backend: CpuKvBackend,
     shape: list[int],
@@ -263,6 +282,8 @@ def _alloc_cpu_kv_tensor(
 
     - offload: MemFabric ``offload.empty`` + 2MiB align (same as KVOffloadDecodeManager)
     - swap_memory: ``torch_npu.empty_with_swapped_memory``
+    - pinned: plain pinned host memory (no MemFabric); functional fallback when
+      the offload pool cannot be initialized on this host
 
     WARNING: on some torch_npu builds, swapped tensors SIGSEGV if you touch
     ``.shape`` / ``.device`` / ``.data_ptr()`` / ``zero_()`` / ``__repr__``.
@@ -270,6 +291,8 @@ def _alloc_cpu_kv_tensor(
     """
     if backend == "offload":
         return _empty_aligned_cpu_tensor(shape, dtype=dtype)
+    if backend == "pinned":
+        return _empty_aligned_host_tensor_pinned(shape, dtype=dtype)
     if backend == "swap_memory":
         if empty_swapped is None:
             raise RuntimeError("cpu-kv-backend=swap_memory requires torch_npu.empty_with_swapped_memory")
@@ -1944,10 +1967,11 @@ def parse_args():
     )
     parser.add_argument(
         "--cpu-kv-backend",
-        choices=("offload", "swap_memory"),
+        choices=("offload", "swap_memory", "pinned"),
         default="offload",
         help="CPU/host KV init: offload=MemFabric offload.empty (default); "
-        "swap_memory=torch_npu.empty_with_swapped_memory",
+        "swap_memory=torch_npu.empty_with_swapped_memory; "
+        "pinned=plain pinned host memory, no MemFabric (functional fallback)",
     )
     parser.add_argument(
         "--dram-size-gb",
@@ -2300,7 +2324,7 @@ def main():
                 f"(need >= {need_bytes / _GIB:.3f} GiB; try --dram-size-gb "
                 f"{recommended_dram_size_gb(plan_msl)})"
             )
-    elif empty_swapped is None:
+    elif cpu_kv_backend == "swap_memory" and empty_swapped is None:
         raise RuntimeError("cpu-kv-backend=swap_memory but torch_npu.empty_with_swapped_memory is unavailable")
 
     mode = "graph" if args.use_graph else "eager"

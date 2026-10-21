@@ -23,6 +23,7 @@ if [ -z "${ASCEND_CUSTOM_OPP_PATH:-}" ]; then
 fi
 
 DRAM_GB="${DSA_DRAM_POOL_GB:-0.06}"
+CPU_KV_BACKEND="${DSA_CPU_KV_BACKEND:-pinned}"
 PROCS="${PROCS:-1}"
 MSL="${MSL:-8192}"
 BS="${BS:-1,2,4,8}"
@@ -45,6 +46,7 @@ LOG="$LOGDIR/case_small_$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD 2>/d
 echo "==================================================================="
 echo " 小内存性能冒烟"
 echo "   池大小      : ${DRAM_GB} GiB（64 MiB 限制内）"
+echo "   KV 后端     : ${CPU_KV_BACKEND}（pinned = 不经 MemFabric）"
 echo "   msl / bs    : ${MSL} / ${BS}"
 echo "   命中率      : ${RATIOS}（无 A/A 标签）"
 echo "   进程数      : ${PROCS}　卡: ${ASCEND_RT_VISIBLE_DEVICES}"
@@ -56,6 +58,7 @@ python3 yq_files/sweep_median.py --processes "$PROCS" --e2e --echo -- \
     --batch-size "$BS" \
     --max-seq-len "$MSL" \
     --dram-size-gb "$DRAM_GB" \
+    --cpu-kv-backend "$CPU_KV_BACKEND" \
     --topk 2048 --q-heads 16 --topk-buffer-size 4096 --plan-direct on \
     --warmup 10 --iters 50 --repeat 1 --kernel-time 200 --disable-gc \
     --hit-layout strided \
