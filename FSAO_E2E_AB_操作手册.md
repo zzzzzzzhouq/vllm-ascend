@@ -40,8 +40,8 @@
 
 - [ ] 1. `npu-smi info -l` 确认逻辑 NPU 数（A3：8 NPU × chipcount 2 = **16**），每 chip 64GB，合计 **1TB**；`free -g` 看 host 内存
 - [ ] 2. 确认权重：优先 `GLM-5.1-w4a8`（最稳），或 `GLM-5.2-w4a8`（755GB，TP16 可试）；必须**非 c8**，`config.json` 有 `index_topk`、无 `compress_ratios`
-- [ ] 3. 编译**基线版完整算子包**（全部 A3 算子，不是单算子）→ `/home/z00943842/base/fsao_ab/ops/base`
-- [ ] 4. 完整安装并编译**优化版完整算子包** → `/home/z00943842/base/fsao_ab/ops/opt`
+- [ ] 3. 编译**基线版完整算子包**（全部 A3 算子，不是单算子）→ `$WORK_ROOT/fsao_ab/ops/base`
+- [ ] 4. 完整安装并编译**优化版完整算子包** → `$WORK_ROOT/fsao_ab/ops/opt`
 - [ ] 5. 两个包分别跑仓内单算子测试，均 `4 passed`
 - [ ] 6. 单独 venv 安装 `ais-bench-benchmark`，克隆压测工具、改 `config.py`
 - [ ] 7. 起服务（带 `sparse_kv_offload_config`），`/health` 正常、单请求成功
@@ -82,30 +82,27 @@
 
 在容器内创建环境文件，后续每个新终端都先 `source` 它：
 
-> `fsao_ab` 与 `vllm-ascend` 仓库**平级**（都放在 `/home/z00943842/base` 下）。
+> `fsao_ab` 与 `vllm-ascend` 仓库**平级**（都放在同一个 `<workspace>` 下）。
 
 ```bash
-# vllm-ascend 仓库的上一级目录（按本机实际路径修改）
-WORK_ROOT=/home/z00943842/base
+# 改成你自己的工作目录（vllm-ascend 的上一级），建议写进 ~/.bashrc
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}
 mkdir -p "$WORK_ROOT/fsao_ab/results"
 
 cat > "$WORK_ROOT/fsao_ab/env.sh" <<'EOF'
-# ===== 按实际情况修改 =====
-export WORK_ROOT=/home/z00943842/base              # vllm-ascend 的上一级目录
-export VLLM_SRC=$WORK_ROOT/vllm-ascend             # 仓库根目录
-export BASE_WORKTREE=$WORK_ROOT/vllm-ascend-base   # 基线 worktree
-export AB=$WORK_ROOT/fsao_ab                       # 测试工作目录（与仓库平级）
-export AISV_DIR=$WORK_ROOT/aisvenv                 # 压测客户端 venv
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}
+export VLLM_SRC=$WORK_ROOT/vllm-ascend
+export VLLM_UPSTREAM=${VLLM_UPSTREAM:-$WORK_ROOT/vllm}
+export BASE_WORKTREE=$WORK_ROOT/vllm-ascend-base
+export AB=$WORK_ROOT/fsao_ab
+export AISV_DIR=$WORK_ROOT/aisvenv
 export AISBENCH_TOOL=$WORK_ROOT/aisbench_auto_tools_prefix
 export DATASET_DIR=$WORK_ROOT/dataset
-
-# 权重路径
-export MODEL_PATH=/mnt/weight/GLM-5.1-w4a8
-export MODEL_PATH_52=/mnt/weight/GLM-5.2-w4a8      # 可试
-
+export MODEL_PATH=${MODEL_PATH:-/path/to/GLM-5.1-w4a8}
+export MODEL_PATH_52=${MODEL_PATH_52:-/path/to/GLM-5.2-w4a8}
 export NPU_NUM=16
-export SERVED_NAME=glm-5.1                         # 与 --served-model-name 一致
-export HOST_IP=127.0.0.1                           # 客户端与服务同机时用回环；跨机改成服务端 IP
+export SERVED_NAME=glm-5.1
+export HOST_IP=127.0.0.1
 export PORT=8000
 export OPS_BASE=$AB/ops/base
 export OPS_OPT=$AB/ops/opt
@@ -120,7 +117,8 @@ mkdir -p "$OPS_BASE" "$OPS_OPT" "$DATASET_DIR"
 ## 3. 阶段 0：环境盘点
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 
 # 1) 卡型号和显存（看 HBM-Usage 的总量：65536≈64GB，131072≈128GB）
 npu-smi info
@@ -206,7 +204,7 @@ python3 -c "import torch, torch_npu; print(torch.__version__, torch_npu.__versio
 vllm serve --help > /dev/null && echo "vllm CLI OK"    # 提前暴露缺失依赖（如 orjson）
 
 # main 分支应装 .github/vllm-main-verified.commit 对应的 vLLM commit
-VLLM_UPSTREAM=${VLLM_UPSTREAM:-/vllm-workspace/vllm}
+# VLLM_UPSTREAM 在 env.sh 中定义（上游 vLLM 源码目录）
 test "$(git -C "$VLLM_UPSTREAM" rev-parse HEAD 2>/dev/null)" = \
      "$(tr -d '[:space:]' < .github/vllm-main-verified.commit)" && echo "vllm commit OK"
 ```
@@ -228,7 +226,8 @@ python3 -m pip install -r requirements.txt
 ### 4.1 拉基线代码（worktree，不切分支）
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 cd "$VLLM_SRC"
 git fetch --all
 git worktree add "$BASE_WORKTREE" 96e222490
@@ -349,7 +348,8 @@ ls -l "$VLLM_SRC/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/
 ### 5.1 安装 aisbench
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 python3 -m venv "$AISV_DIR"
 source "$AISV_DIR/bin/activate"
 pip install -U pip
@@ -363,7 +363,8 @@ python3 -c "import ais_bench, os; print(os.path.dirname(os.path.dirname(ais_benc
 ### 5.2 下载压测工具并改配置
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 cd "$WORK_ROOT"
 git clone https://github.com/rayn-zzz/aisbench_auto_tools_prefix.git   # 已存在则跳过
 cd "$AISBENCH_TOOL"
@@ -372,10 +373,10 @@ cd "$AISBENCH_TOOL"
 编辑 `config.py`：
 
 ```python
-DATASET_PATH = "/home/z00943842/base/dataset"      # 与 env.sh 的 DATASET_DIR 一致
+DATASET_PATH = "/path/to/workspace/dataset"        # 与 env.sh 的 DATASET_DIR 一致
 WORK_PATH    = "<5.1 打印的目录>"                   # 目录下要有 ais_bench/
 MODEL_NAME   = "glm-5.1"                          # 必须等于 --served-model-name
-MODEL_PATH   = "/mnt/weight/GLM-5.1-w4a8"          # 只用来读 tokenizer（与 env.sh 一致）
+MODEL_PATH   = "/path/to/GLM-5.1-w4a8"             # 与 env.sh 的 MODEL_PATH 一致
 HOST_IP      = "127.0.0.1"   # 客户端与服务同机时用回环；跨机改成服务端 IP
 HOST_PORT    = "8000"        # 与 env.sh 的 PORT 一致
 API_KEY      = ""            # 本机 vllm serve 没配 --api-key，留空即可
@@ -400,7 +401,7 @@ URL          = ""
 
 ```bash
 pip show -f ais-bench-benchmark | grep Location
-# 例如：Location: /home/z00943842/base/aisvenv/lib/python3.12/site-packages
+# 例如：Location: <venv>/lib/python3.x/site-packages
 ```
 
 填错时常见报错：`dataset not found`、`vllm_api_chat_temp not found`、找不到 `train.jsonl`。
@@ -408,7 +409,8 @@ pip show -f ais-bench-benchmark | grep Location
 ### 5.3 客户端自检
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 source "$AISV_DIR/bin/activate"
 python3 -c "from config import *; print(WORK_PATH, MODEL_NAME); import os; print(os.path.isdir(os.path.join(WORK_PATH,'ais_bench')))"
 # 期望最后输出 True
@@ -423,7 +425,8 @@ python3 -c "from config import *; print(WORK_PATH, MODEL_NAME); import os; print
 ### 6.1 启动前检查
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 
 # 1) 没有残留服务
 pkill -f "vllm serve" || true
@@ -444,7 +447,8 @@ unset http_proxy https_proxy
 建议用 tmux 开两个窗口：一个跑服务，一个跑压测。
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export HCCL_BUFFSIZE=512
@@ -541,7 +545,8 @@ curl -s http://$HOST_IP:$PORT/v1/chat/completions \
 ### 7.2 压测命令
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 source "$AISV_DIR/bin/activate"
 cd "$AISBENCH_TOOL"
 unset http_proxy https_proxy
@@ -694,7 +699,7 @@ PY
 | 找不到算子 / `libcust_opapi.so` 加载失败 | `_cann_ops_custom` 没换、只装了单算子包，或服务没重启 | 按 4.6 换完整包、重启进程、开新终端 |
 | `/metrics` 查不到 `prefix_cache` | 代理未关 / 多进程指标目录未设 | `unset http_proxy https_proxy`；设置 `PROMETHEUS_MULTIPROC_DIR` |
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删除该参数 |
-| `ModuleNotFoundError: No module named 'orjson'`（或其它 vllm 依赖） | `vllm` 命令使用的 Python 环境缺少 vLLM 依赖 | 用 `vllm` 入口同一个解释器安装：`/usr/local/python3.12.16/bin/python3 -m pip install orjson`；缺得多就装 `-r /vllm-workspace/vllm/requirements/common.txt`（**不要**装 `cuda.txt`） |
+| `ModuleNotFoundError: No module named 'orjson'`（或其它 vllm 依赖） | `vllm` 命令使用的 Python 环境缺少 vLLM 依赖 | 用 `vllm` 入口同一个解释器：`head -1 $(command -v vllm)` 查看路径，再用该 python `-m pip install orjson`；缺得多就装 `-r "$VLLM_UPSTREAM/requirements/common.txt"`（**不要**装 `cuda.txt`） |
 | `hcclGetRootInfo ... error code is 19 (call network api fail)` / `ERR02200 DIST call hccl api failed` | HCCL 选网卡失败、hostname 解析不到，或上次崩溃残留 | 设 `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`（用 `ip -o -4 addr show \| grep <本机IP>` 找网卡）；`/etc/hosts` 补 hostname；清理残留进程；`/dev/shm` ≥ 1GB |
 | `HCCL_INTRA_PCIE_ENABLE or HCCL_INTRA_ROCE_ENABLE is invalid (EmptyString or 0 ... not both 1)` | 只设了 `HCCL_INTRA_ROCE_ENABLE=0`，而 `HCCL_INTRA_PCIE_ENABLE` 为空 | 两个都 `unset`（自动选择）；或显式 `HCCL_INTRA_PCIE_ENABLE=1` + `HCCL_INTRA_ROCE_ENABLE=0`。两者不能同时为 1 |
 | `HCCL_BUFFSIZE_EP is too SMALL ... NEEDED_HCCL_BUFFSIZE=... actual CCL_BUFFSIZE=...`，随后 `vector core exception` / `aclnnMoeDistributeCombineV4 failed` | `HCCL_BUFFSIZE` 小于 MoE AllToAll 所需（常见需 ~206MB 以上） | 把 `HCCL_BUFFSIZE` 单位 MB 调大，例如 `export HCCL_BUFFSIZE=512`，重启服务 |
@@ -851,7 +856,8 @@ grep -c '"compress_ratios"' "$MODEL_PATH/config.json"
 对每个算子包都要验证一次：**先按 4.6 切到目标包**，再执行下面的命令。
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 source "$VLLM_SRC/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
 
 cd "$VLLM_SRC"
@@ -958,7 +964,8 @@ PD 需要额外的 memfabric 配置和代理进程；如果只是做算子 A/B�
 ## 附录 D：清理与回滚
 
 ```bash
-source /home/z00943842/base/fsao_ab/env.sh
+export WORK_ROOT=${WORK_ROOT:-$HOME/workspace}   # 已写进 ~/.bashrc 可省略
+source "$WORK_ROOT/fsao_ab/env.sh"
 
 # 停服务
 pkill -f "vllm serve" || true
