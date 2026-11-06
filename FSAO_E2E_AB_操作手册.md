@@ -37,8 +37,8 @@
 
 - [ ] 1. `npu-smi info -l` 确认逻辑 NPU 数（A3：8 NPU × chipcount 2 = **16**），每 chip 64GB，合计 **1TB**；`free -g` 看 host 内存
 - [ ] 2. 确认权重：优先 `GLM-5.1-w4a8`（最稳），或 `GLM-5.2-w4a8`（755GB，TP16 可试）；必须**非 c8**，`config.json` 有 `index_topk`、无 `compress_ratios`
-- [ ] 3. 编译**基线版完整算子包**（全部 A3 算子，不是单算子）→ `~/fsao_ab/ops/base`
-- [ ] 4. 完整安装并编译**优化版完整算子包** → `~/fsao_ab/ops/opt`
+- [ ] 3. 编译**基线版完整算子包**（全部 A3 算子，不是单算子）→ `/home/z00943842/base/fsao_ab/ops/base`
+- [ ] 4. 完整安装并编译**优化版完整算子包** → `/home/z00943842/base/fsao_ab/ops/opt`
 - [ ] 5. 两个包分别跑仓内单算子测试，均 `4 passed`
 - [ ] 6. 单独 venv 安装 `ais-bench-benchmark`，克隆压测工具、改 `config.py`
 - [ ] 7. 起服务（带 `sparse_kv_offload_config`），`/health` 正常、单请求成功
@@ -79,27 +79,36 @@
 
 在容器内创建环境文件，后续每个新终端都先 `source` 它：
 
-```bash
-mkdir -p ~/fsao_ab/results
-cat > ~/fsao_ab/env.sh <<'EOF'
-# ===== 按实际情况修改这三行 =====
-# 推荐：/root/models/GLM-5.1-w4a8（非 c8，最稳）
-# 可试：/root/models/GLM-5.2-w4a8（755GB，TP16 下每 chip 约 47GB，余量小）
-export MODEL_PATH=/root/models/GLM-5.1-w4a8        # 权重绝对路径
-export VLLM_SRC=$HOME/vllm-ascend                  # 你的 vllm-ascend 仓库
-export NPU_NUM=16                                  # 逻辑 NPU 数（8 物理卡 × 2 chip）
-# ==============================
+> `fsao_ab` 与 `vllm-ascend` 仓库**平级**（都放在 `/home/z00943842/base` 下）。
 
-export AB=$HOME/fsao_ab
+```bash
+# vllm-ascend 仓库的上一级目录（按本机实际路径修改）
+WORK_ROOT=/home/z00943842/base
+mkdir -p "$WORK_ROOT/fsao_ab/results"
+
+cat > "$WORK_ROOT/fsao_ab/env.sh" <<'EOF'
+# ===== 按实际情况修改 =====
+export WORK_ROOT=/home/z00943842/base              # vllm-ascend 的上一级目录
+export VLLM_SRC=$WORK_ROOT/vllm-ascend             # 仓库根目录
+export BASE_WORKTREE=$WORK_ROOT/vllm-ascend-base   # 基线 worktree
+export AB=$WORK_ROOT/fsao_ab                       # 测试工作目录（与仓库平级）
+export AISV_DIR=$WORK_ROOT/aisvenv                 # 压测客户端 venv
+export AISBENCH_TOOL=$WORK_ROOT/aisbench_auto_tools_prefix
+export DATASET_DIR=$WORK_ROOT/dataset
+
+# 权重路径
+export MODEL_PATH=/mnt/weight/GLM-5.1-w4a8
+export MODEL_PATH_52=/mnt/weight/GLM-5.2-w4a8      # 可试
+
+export NPU_NUM=16
+export SERVED_NAME=glm-5.1                         # 与 --served-model-name 一致
+export HOST_IP=127.0.0.1                           # 客户端与服务同机时用回环；跨机改成服务端 IP
+export PORT=8000
 export OPS_BASE=$AB/ops/base
 export OPS_OPT=$AB/ops/opt
-export SERVED_NAME=glm-5.1                         # 与 --served-model-name 一致
-export HOST_IP=127.0.0.1
-export PORT=8000
-export DATASET_DIR=/root/dataset
 EOF
 
-source ~/fsao_ab/env.sh
+source "$WORK_ROOT/fsao_ab/env.sh"
 mkdir -p "$OPS_BASE" "$OPS_OPT" "$DATASET_DIR"
 ```
 
@@ -108,7 +117,7 @@ mkdir -p "$OPS_BASE" "$OPS_OPT" "$DATASET_DIR"
 ## 3. 阶段 0：环境盘点
 
 ```bash
-source ~/fsao_ab/env.sh
+source /home/z00943842/base/fsao_ab/env.sh
 
 # 1) 卡型号和显存（看 HBM-Usage 的总量：65536≈64GB，131072≈128GB）
 npu-smi info
@@ -216,11 +225,11 @@ python3 -m pip install -r requirements.txt
 ### 4.1 拉基线代码（worktree，不切分支）
 
 ```bash
-source ~/fsao_ab/env.sh
+source /home/z00943842/base/fsao_ab/env.sh
 cd "$VLLM_SRC"
 git fetch --all
-git worktree add ~/vllm-ascend-base 96e222490
-git -C ~/vllm-ascend-base log --oneline -1
+git worktree add "$BASE_WORKTREE" 96e222490
+git -C "$BASE_WORKTREE" log --oneline -1
 ```
 
 ### 4.2 编译环境变量（两个 worktree 都 source）
@@ -273,7 +282,7 @@ cp -a "$VLLM_SRC/vllm_ascend/_cann_ops_custom" "$OPS_OPT"
 ### 4.4 构建**基线版完整算子包**（在 worktree，不重装 Python）
 
 ```bash
-cd ~/vllm-ascend-base
+cd "$BASE_WORKTREE"
 
 # worktree 不会自动带 submodule；从主树拷过来
 if [ ! -d csrc/third_party/catlass/include ]; then
@@ -289,7 +298,7 @@ rm -rf "$OPS_BASE"
 cp -a "$PWD/vllm_ascend/_cann_ops_custom" "$OPS_BASE"
 ```
 
-> ⚠️ **不要**在 `~/vllm-ascend-base` 里执行 `pip install -e .`。Python 包和 `vllm_ascend_C` 扩展始终用 `$VLLM_SRC`（HEAD）那份，基线只取它的完整算子包。
+> ⚠️ **不要**在 `$BASE_WORKTREE` 里执行 `pip install -e .`。Python 包和 `vllm_ascend_C` 扩展始终用 `$VLLM_SRC`（HEAD）那份，基线只取它的完整算子包。
 
 ### 4.5 验收
 
@@ -337,8 +346,9 @@ ls -l "$VLLM_SRC/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/
 ### 5.1 安装 aisbench
 
 ```bash
-python3 -m venv ~/aisvenv
-source ~/aisvenv/bin/activate
+source /home/z00943842/base/fsao_ab/env.sh
+python3 -m venv "$AISV_DIR"
+source "$AISV_DIR/bin/activate"
 pip install -U pip
 pip install ais-bench-benchmark pandas
 
@@ -350,20 +360,21 @@ python3 -c "import ais_bench, os; print(os.path.dirname(os.path.dirname(ais_benc
 ### 5.2 下载压测工具并改配置
 
 ```bash
-cd ~
-git clone https://github.com/rayn-zzz/aisbench_auto_tools_prefix.git
-cd aisbench_auto_tools_prefix
+source /home/z00943842/base/fsao_ab/env.sh
+cd "$WORK_ROOT"
+git clone https://github.com/rayn-zzz/aisbench_auto_tools_prefix.git   # 已存在则跳过
+cd "$AISBENCH_TOOL"
 ```
 
 编辑 `config.py`：
 
 ```python
-DATASET_PATH = "/root/dataset"                     # 阶段 2 已建好
+DATASET_PATH = "/home/z00943842/base/dataset"      # 与 env.sh 的 DATASET_DIR 一致
 WORK_PATH    = "<5.1 打印的目录>"                   # 目录下要有 ais_bench/
 MODEL_NAME   = "glm-5.1"                          # 必须等于 --served-model-name
-MODEL_PATH   = "/root/models/GLM-5.1-w4a8"         # 只用来读 tokenizer（与 env.sh 一致）
-HOST_IP      = "127.0.0.1"
-HOST_PORT    = "8000"
+MODEL_PATH   = "/mnt/weight/GLM-5.1-w4a8"          # 只用来读 tokenizer（与 env.sh 一致）
+HOST_IP      = "127.0.0.1"   # 客户端与服务同机时用回环；跨机改成服务端 IP
+HOST_PORT    = "8000"        # 与 env.sh 的 PORT 一致
 API_KEY      = ""            # 本机 vllm serve 没配 --api-key，留空即可
 DEFAULT_PERFORMANCE_TEST = "default_perf"
 OUTPUT_DIR   = "./outputs/default"
@@ -386,7 +397,7 @@ URL          = ""
 
 ```bash
 pip show -f ais-bench-benchmark | grep Location
-# 例如：Location: /root/aisvenv/lib/python3.10/site-packages
+# 例如：Location: /home/z00943842/base/aisvenv/lib/python3.12/site-packages
 ```
 
 填错时常见报错：`dataset not found`、`vllm_api_chat_temp not found`、找不到 `train.jsonl`。
@@ -394,7 +405,8 @@ pip show -f ais-bench-benchmark | grep Location
 ### 5.3 客户端自检
 
 ```bash
-source ~/aisvenv/bin/activate
+source /home/z00943842/base/fsao_ab/env.sh
+source "$AISV_DIR/bin/activate"
 python3 -c "from config import *; print(WORK_PATH, MODEL_NAME); import os; print(os.path.isdir(os.path.join(WORK_PATH,'ais_bench')))"
 # 期望最后输出 True
 ```
@@ -408,7 +420,7 @@ python3 -c "from config import *; print(WORK_PATH, MODEL_NAME); import os; print
 ### 6.1 启动前检查
 
 ```bash
-source ~/fsao_ab/env.sh
+source /home/z00943842/base/fsao_ab/env.sh
 
 # 1) 没有残留服务
 pkill -f "vllm serve" || true
@@ -429,7 +441,7 @@ unset http_proxy https_proxy
 建议用 tmux 开两个窗口：一个跑服务，一个跑压测。
 
 ```bash
-source ~/fsao_ab/env.sh
+source /home/z00943842/base/fsao_ab/env.sh
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export HCCL_BUFFSIZE=200
@@ -526,8 +538,9 @@ curl -s http://$HOST_IP:$PORT/v1/chat/completions \
 ### 7.2 压测命令
 
 ```bash
-source ~/aisvenv/bin/activate
-cd ~/aisbench_auto_tools_prefix
+source /home/z00943842/base/fsao_ab/env.sh
+source "$AISV_DIR/bin/activate"
+cd "$AISBENCH_TOOL"
 unset http_proxy https_proxy
 
 python3 aisbench_test.py \
@@ -631,7 +644,7 @@ cp aisbench.log          "$AB/results/base_r1.log"
 | **中位数** | opt | | | | | | | |
 | **变化** | opt vs base | | | | | | | |
 
-快速取中位数（在 `~/fsao_ab/results` 下）：
+快速取中位数（在 `$AB/results` 下）：
 
 ```bash
 python3 - <<'PY'
@@ -831,7 +844,7 @@ grep -c '"compress_ratios"' "$MODEL_PATH/config.json"
 对每个算子包都要验证一次：**先按 4.6 切到目标包**，再执行下面的命令。
 
 ```bash
-source ~/fsao_ab/env.sh
+source /home/z00943842/base/fsao_ab/env.sh
 source "$VLLM_SRC/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
 
 cd "$VLLM_SRC"
@@ -938,12 +951,14 @@ PD 需要额外的 memfabric 配置和代理进程；如果只是做算子 A/B�
 ## 附录 D：清理与回滚
 
 ```bash
+source /home/z00943842/base/fsao_ab/env.sh
+
 # 停服务
 pkill -f "vllm serve" || true
 
 # 删除基线 worktree
 cd "$VLLM_SRC"
-git worktree remove ~/vllm-ascend-base --force
+git worktree remove "$BASE_WORKTREE" --force
 
 # 可选：删除编译产物和临时包
 rm -rf "$AB/ops" "$AB/results"
