@@ -367,6 +367,23 @@ URL          = ""
 > `API_KEY` 只有两种情况需要填：你自己启动时加了 `--api-key xxx`，或者服务前面有带鉴权的网关。
 > 手册里的 `vllm serve` 没有鉴权，**留空**，不需要去申请任何 key；压测和 `/metrics` 都能正常访问。
 
+**`WORK_PATH` 是干什么的**：它是**包含 `ais_bench/` 包的目录**。工具会往里面写三样东西：
+
+| 路径 | 用途 |
+|---|---|
+| `$WORK_PATH/ais_bench/datasets/gsm8k/test.jsonl` | 生成的前缀数据集软链 |
+| `$WORK_PATH/ais_bench/datasets/gsm8k/train.jsonl` | `ais_bench` 的 gsm8k 入口文件，不存在时建空文件 |
+| `$WORK_PATH/ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py` | 按 `config.py` 生成的 API 配置 |
+
+所以它必须指向**实际执行 `ais_bench` 命令的那个安装**（用 venv 就是该 venv 的 `site-packages`），且目录可写：
+
+```bash
+pip show -f ais-bench-benchmark | grep Location
+# 例如：Location: /root/aisvenv/lib/python3.10/site-packages
+```
+
+填错时常见报错：`dataset not found`、`vllm_api_chat_temp not found`、找不到 `train.jsonl`。
+
 ### 5.3 客户端自检
 
 ```bash
