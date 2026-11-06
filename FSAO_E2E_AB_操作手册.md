@@ -27,6 +27,7 @@
 - [附录 B：Python 扩展编译（备用方案）](#附录-bpython-扩展编译备用方案)
 - [附录 C：16 逻辑 NPU 的 PD 分离方案](#附录-c16-逻辑-npu-的-pd-分离方案)
 - [附录 D：清理与回滚](#附录-d清理与回滚)
+- [附录 E：HCCL 最小自检（可选）](#附录-ehccl-最小自检可选)
 
 ---
 
@@ -954,6 +955,43 @@ rm -rf "$AB/ops" "$AB/results"
 cd "$VLLM_SRC"
 git status
 ```
+
+---
+
+## 附录 E：HCCL 最小自检（可选）
+
+当 vLLM 报 HCCL 相关错误时，用这段独立脚本区分「环境问题」和「vLLM 问题」：
+
+```python
+# /tmp/hccl_test.py
+import os
+import torch
+import torch_npu
+import torch.distributed as dist
+
+local_rank = int(os.environ["LOCAL_RANK"])
+torch.npu.set_device(local_rank)                     # 关键：每个 rank 绑定自己的 NPU
+dist.init_process_group("hccl", rank=int(os.environ["RANK"]),
+                        world_size=int(os.environ["WORLD_SIZE"]))
+t = torch.ones(1, device=f"npu:{local_rank}")
+dist.all_reduce(t)
+print(f"rank {os.environ['RANK']} device {local_rank} ok {t.item()}")
+dist.destroy_process_group()
+```
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+torchrun --nproc_per_node=8 --master_port=29500 /tmp/hccl_test.py
+```
+
+判读：
+
+| 现象 | 含义 |
+|---|---|
+| `same physical device ID 0` | 脚本/进程没绑定各自的 NPU（缺 `torch.npu.set_device(local_rank)`） |
+| `EI0015 Ranktable_Detect` + 网卡提示 | `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME` 配错 |
+| `HCCL_INTRA_* invalid` | 两个 intra 变量要么都 unset，要么显式互斥 |
+| 8 个 rank 都打印 `ok` | HCCL 正常，问题在 vLLM 启动参数或环境变量继承 |
 
 ---
 
