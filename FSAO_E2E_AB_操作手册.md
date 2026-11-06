@@ -673,6 +673,7 @@ PY
 | `/metrics` 查不到 `prefix_cache` | 代理未关 / 多进程指标目录未设 | `unset http_proxy https_proxy`；设置 `PROMETHEUS_MULTIPROC_DIR` |
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删除该参数 |
 | `ModuleNotFoundError: No module named 'orjson'`（或其它 vllm 依赖） | `vllm` 命令使用的 Python 环境缺少 vLLM 依赖 | 用 `vllm` 入口同一个解释器安装：`/usr/local/python3.12.16/bin/python3 -m pip install orjson`；缺得多就装 `-r /vllm-workspace/vllm/requirements/common.txt`（**不要**装 `cuda.txt`） |
+| 日志显示 `Initializing a V1 LLM engine (v0.30.0)`，但分支要求 v0.31.0 | vLLM 版本与 vllm-ascend 分支不匹配 | 按 4.0 安装 v0.31.0 源码，然后重新执行 `pip install -e .`（需要重新编译 `vllm_ascend_C`） |
 | 启动 OOM | 权重 + KV + 图内存超过 64GB/chip | 降 `--max-model-len` / `--max-num-seqs` / `--max-num-batched-tokens`，或去掉 `--compilation-config`、换 GLM-5.1-w4a8 |
 | 命中率远低于 90% | host pool 太小导致 block 被换出 | 提高 `dram_size_per_dp_GB`（host 内存允许时）或降低并发 |
 | 图模式启动失败 | 该路径图捕获有问题 | 加 `--enforce-eager` 先跑通（A/B 两端保持一致即可） |
