@@ -11,6 +11,44 @@
 
 ---
 
+## 硬件与软件要求
+
+以下为已在 A3 单机验证过的环境；换硬件或换版本后需重新确认兼容性。
+
+### 硬件要求
+
+| 项目 | 要求 |
+|---|---|
+| 设备 | Atlas A3（`ascend910_9382`，SOC `ascend910_93`，arch22 路径） |
+| NPU | 8 张物理卡 × 2 chip = **16 个逻辑 NPU**（`npu-smi info -l` 显示 8 个 NPU、每个 chipcount 2） |
+| 单 chip HBM | 64GB；合计 **1TB** |
+| 部署拓扑 | 单机，TP16 + EP16 |
+| Host 内存 | ≥ 512GB（实测 2.9TB）；需容纳 391GB 权重 page cache + sparse offload host pool（`dram_size_per_dp_GB`） |
+| `/dev/shm` | ≥ 1GB（建议 8~16GB；实测 500GB） |
+| 磁盘 | 构建产物预留 ≥ 100GB；权重 391GB（本机在 NFS 上） |
+| 网络 | HCCL 可用网卡/IP（本机 `enp162s0f0` / `10.246.63.33`） |
+
+### 软件要求
+
+| 项目 | 要求 |
+|---|---|
+| OS / Python | Linux；Python 3.12（实测 3.12.16） |
+| CANN | 与 torch_npu 2.10.0.post4 匹配的 CANN toolkit + 驱动 |
+| vLLM | `.github/vllm-main-verified.commit` 对应的 commit（日志版本号可能显示 `v0.30.0`，正常） |
+| vllm-ascend | PR #20927 分支（`happy-math:temp2` 或本地 `dsa-a3-opt-only`） |
+| torch / torch_npu | `2.10.0` / `2.10.0.post4` |
+| transformers | `5.19.0` |
+| triton-ascend | `3.2.2` |
+| memfabric_hybrid | `1.2.0`（sparse offload 必需） |
+| memcache_hybrid | `1.2.0` |
+| 压测客户端 | `ais-bench-benchmark` + `pandas`（独立 venv） |
+| 模型权重 | `GLM-5.1-w4a8`，391GB，非 c8，BF16 主 KV，带 `index_topk` |
+
+> 版本以仓库的 `requirements.txt` 和 `.github/vllm-main-verified.commit` 为准。
+> 本 PR 只改 arch22（A2/A3）；Ascend 950（arch35）路径未改动，不在本文验证范围。
+
+---
+
 ## 0. 一页纸执行清单
 
 - [ ] 1. 确认硬件：`npu-smi info -l` 显示 8 个 NPU × chipcount 2 = 16 个逻辑 NPU
