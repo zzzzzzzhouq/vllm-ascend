@@ -207,6 +207,9 @@ COMPILE_CUSTOM_KERNELS=1 python3 -m pip install -e . --no-build-isolation
 
 首次构建时间较长（常见 30 分钟以上），建议放在 tmux / nohup 里跑。
 
+> **换算子 / 换分支的正确做法**：`git checkout` 之后必须 `rm -rf csrc/build` 再执行 `COMPILE_CUSTOM_KERNELS=1 pip install -e .`。
+> `COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，**不会重新编译算子**；也不能只替换 `build.sh --ops=...` 的单算子包。
+
 > 如果 `pip install -e .` 在构建全量算子阶段失败，可以拆成两步：
 > 1. `bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"`（构建完整算子包）；
 > 2. 按[附录 B](#附录-bpython-扩展编译备用方案)单独构建 `vllm_ascend_C` 扩展。
