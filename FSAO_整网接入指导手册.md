@@ -33,10 +33,10 @@
 | 项目 | 要求 |
 |---|---|
 | OS / Python | Linux；Python 3.12（实测 3.12.16） |
-| CANN | 与 torch_npu 2.10.0.post4 匹配的 CANN toolkit + 驱动 |
+| CANN | 与 torch_npu 匹配的 CANN toolkit + 驱动（本机 `cann-9.2.1` + `ascend-toolkit/latest` 均可被 torch_npu 加载） |
 | vLLM | `.github/vllm-main-verified.commit` 对应的 commit（日志版本号可能显示 `v0.30.0`，正常） |
 | vllm-ascend | PR #20927 分支（`happy-math:temp2` 或本地 `dsa-a3-opt-only`） |
-| torch / torch_npu | `2.10.0` / `2.10.0.post4` |
+| torch / torch_npu | `2.10.0` / `2.10.0.post4`（requirements）；本机实测 `2.10.0.post7` 可运行 |
 | transformers | `5.19.0` |
 | triton-ascend | `3.2.2` |
 | memfabric_hybrid | `1.2.0`（sparse offload 必需） |
@@ -161,8 +161,9 @@ grep -oE '"(index_topk|compress_ratios|index_kpool)"' "$MODEL_PATH/config.json" 
 grep -o '"kv_cache_type"[^,}]*' "$MODEL_PATH/quant_model_description.json" 2>/dev/null
 
 # 6) vLLM 环境
-python3 -c "import vllm; print('vllm', vllm.__version__)"
+python3 -c "import vllm; print('vllm file:', vllm.__file__)"
 python3 -c "import vllm_ascend; print(vllm_ascend.__file__)"
+python3 -m pip show vllm | head -3
 vllm serve --help > /dev/null && echo "vllm CLI OK"
 
 # 7) main 分支应装 .github/vllm-main-verified.commit 对应的 vLLM commit
@@ -178,6 +179,9 @@ test "$(git -C "$VLLM_UPSTREAM" rev-parse HEAD 2>/dev/null)" = \
 | config.json | 有 `index_topk`，无 `compress_ratios` |
 | vLLM | main-verified commit（版本号可能是 `v0.30.0` 之类，正常） |
 | 依赖 | `memfabric_hybrid`、`memcache_hybrid` 已安装 |
+
+> 如果 `vllm.__file__` 是 `None`，说明当前目录下有 `vllm/` 目录遮蔽了安装包（例如 `/home/vllm`），换到 `$VLLM_SRC` 下执行，或删除/改名那个目录。
+> `vllm.__version__` 在某些版本里不存在，以 `pip show vllm` 和 `vllm serve --help` 为准。
 
 > `GLM-5.2-w8a8` 文档下限 1TB，本机刚好达到但余量极小；`GLM-5.2-w4a8` 实测 755GB，TP16 下每 chip 约 47GB，32K 可试但很紧。本文以 391GB 的 `GLM-5.1-w4a8` 为准。
 
@@ -245,8 +249,10 @@ COMPILE_CUSTOM_KERNELS=1 python3 -m pip install -e . --no-build-isolation
 
 首次构建时间较长（常见 30 分钟以上），建议放在 tmux / nohup 里跑。
 
-> **换算子 / 换分支的正确做法**：`git checkout` 之后必须 `rm -rf csrc/build` 再执行 `COMPILE_CUSTOM_KERNELS=1 pip install -e .`。
+> **换算子 / 换分支的正确做法**：`git checkout` 之后必须重新编译算子。
 > `COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，**不会重新编译算子**；也不能只替换 `build.sh --ops=...` 的单算子包。
+> 增量构建不需要删 `csrc/build`：`build_aclnn.sh` 会保留它，`touch` 改动文件后重跑即可；只有 CMake 配置/算子列表变化时才需要 `rm -rf csrc/build`。
+> 构建末尾可能出现 `skip ...`（docs/examples 或当前 SOC 不涉及的项）；以 `op ok` + 单算子 `4 passed` 为准。若跳过的是 vendor 包安装，再排查。
 
 > 如果 `pip install -e .` 在构建全量算子阶段失败，可以拆成两步：
 > 1. `bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"`（构建完整算子包）；
@@ -479,6 +485,8 @@ python3 aisbench_test.py \
 
 显存核算：`cc8` 时活跃请求只有 8 个。50% 命中下唯一 token 约 `16.4k + 8 × 16.4k ≈ 14.8 万`，按 80KB/token 约 12GB/chip；加上 24.5GB 权重和激活，能放进 64GB chip。跑完整 32 条时，已完成请求的尾部 KV 可能被换出，但共享前缀会留在缓存里，命中率仍约 50%。
 
+> 如果要做 main vs PR 的 A/B，基线必须用**同一个** `--repeat_rate`（一边 0.9、一边 0.5 不能对比）。详见第 13 节。
+
 ### 9.2 P0 为什么不能放进同一场景
 
 `bs` 不可能同时满足 `≤12`（helper）和 `>24`（P0）。在 `bs ≤ 12` 时，P0 的新代码路径（`workerCount = GetBlockNum() * 2`）**仍会执行**，但因为行数少于 worker 数，收益体现不出来。
@@ -582,6 +590,12 @@ PY
 | 找不到算子 / `libcust_opapi.so` 加载失败 | 只装了单算子包，或服务没重启 | 按第 5 节完整构建；重启进程 |
 | `/metrics` 查不到 `prefix_cache` | 代理未关 / 指标目录未设 | `unset http_proxy https_proxy`；设置 `PROMETHEUS_MULTIPROC_DIR` |
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删除该参数 |
+| `vllm.__file__` 是 `None`，或 `ImportError: cannot import name 'EngineArgs' from 'vllm'` | 当前目录下有名为 `vllm/` 的目录，遮蔽了安装包（命名空间包） | 换到 `/home/z00943842/base/vllm-ascend` 等目录执行；删除/改名多余的 `/home/vllm` |
+| `pip install -e "$VLLM_SRC"` 却执行了 `build_aclnn.sh` | `env.sh` 里 `VLLM_SRC` 指向 vllm-ascend | 装上游 vLLM 要 `cd /vllm-workspace/vllm`，不要用这个变量 |
+| `IndentationError: unexpected indent` | 多行 Python 每行前带了空格 | 用一行 `python3 -c`，或 heredoc 顶格 |
+| `vllm` 版本显示 `0.30.0+empty` | `VLLM_TARGET_DEVICE=empty` 构建的正常后缀 | 正常，不影响运行 |
+| `libruntime_common.so: undefined symbol` / `libgraph_base.so: undefined symbol` | 当前 CANN 与 torch_npu / 算子包不匹配 | 回到之前能跑服务的 CANN 环境（新终端或 source 正确的 `setenv.bash`）；不要用 `--force` 跳过校验 |
+| 构建最后一行有 `skip ...` | 文档/示例或与当前 SOC 无关的项被跳过 | 以 `op ok` + 单算子 `4 passed` 为准；若跳过的是 vendor 包安装再排查 |
 
 ---
 
@@ -612,6 +626,63 @@ grep -c '"compress_ratios"' "$MODEL_PATH/config.json"
 | 32K × 32 请求 | 首选；默认用 `repeat_rate 0.5` 覆盖 Opt05 |
 | 64K × 16 请求 | 可以试 |
 | 128K × 32 请求 | 不建议，每 chip KV 约 45GB + 权重容易超 64GB |
+
+---
+
+## 13. 与 main 分支做 A/B（可选）
+
+如果已经用 main 跑过基线，再切到 PR 分支复测，就得到一组整网 A/B。
+**只换算子包，不要重装 vLLM / torch_npu，也不要重新生成不同 seed 的数据集。**
+
+### 13.1 基线必须同参数
+
+main 的 3 轮和 PR 的 3 轮，下面这些必须完全一致：
+
+| 类别 | 参数 |
+|---|---|
+| 权重 | 同一个 `/mnt/weight/GLM-5.1-w4a8` |
+| 并行 | `--tensor-parallel-size 16`、`--enable-expert-parallel` |
+| 调度 | `--max-model-len`、`--max-num-seqs`、`--max-num-batched-tokens`、`--gpu-memory-utilization` |
+| 编译 | `--compilation-config` |
+| offload | `additional-config` 整份 JSON |
+| HCCL | `HCCL_BUFFSIZE`、`HCCL_IF_IP`、`HCCL_SOCKET_IFNAME` 等 |
+| 压测 | `--input_len`、`--output_len`、`--data_num`、`--concurrency`、`--repeat_rate`、`--seed`、`--npu_num` |
+| 数据 | 同一个 `DATASET_PATH`，不要删数据集或换 seed |
+
+> 一边 90% 命中、一边 50% 命中**不能**直接对比；A/B 两端必须用同一个 `--repeat_rate`。
+
+### 13.2 切换 + 增量重编
+
+```bash
+pkill -9 -f "vllm serve"; pkill -9 -f EngineCore
+sleep 5
+npu-smi info
+
+cd /home/z00943842/base/vllm-ascend
+git checkout dsa-a3-opt-only        # 或 pr20927/temp2
+
+touch csrc/attention/fused_sparse_attention_overlap/op_host/fused_sparse_attention_overlap_tiling.cpp
+touch csrc/attention/fused_sparse_attention_overlap/op_kernel/arch22/fused_sparse_attention_overlap_kernel_mla.h
+touch csrc/attention/fused_sparse_attention_overlap/op_kernel/arch22/fused_sparse_attention_overlap_service_vector_mla.h
+
+export SOC_VERSION=ascend910_9382 MAX_JOBS=8
+bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"
+```
+
+验证 `op ok` + 单算子 `4 passed`，然后用与 main **完全相同**的命令启动服务，跑同样的 3 轮。
+
+### 13.3 对比与判读
+
+| 指标 | main (base) | PR (opt) | 变化 |
+|---|---|---|---|
+| TPOT avg / P90 | | | |
+| output_throughput | | | |
+| E2E_time | | | |
+| 命中率 | | | |
+
+- 取 3 轮中位数；两端命中率应基本一致，否则先查 KV/显存；
+- 差异只有 1~2% 时，建议补一轮交替（base → opt → base）排除温度/频率漂移；
+- 如果 main 不是 PR 的 base commit（领先或落后很多），差异里会混入其他改动，需要在报告里说明。
 
 ---
 
