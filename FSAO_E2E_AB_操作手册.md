@@ -41,7 +41,7 @@
 - [ ] 5. 两个包分别跑仓内单算子测试，均 `4 passed`
 - [ ] 6. 单独 venv 安装 `ais-bench-benchmark`，克隆压测工具、改 `config.py`
 - [ ] 7. 起服务（带 `sparse_kv_offload_config`），`/health` 正常、单请求成功
-- [ ] 8. 按 ABBA 顺序跑 6 轮（base 3 轮 / opt 3 轮），每轮换算子包 + 重启服务
+- [ ] 8. 按 ABBA 顺序跑 6 轮（base 3 轮 / opt 3 轮），每轮换算子包 + 重启服务；补充场景（7.3）另跑 6 轮
 - [ ] 9. 每轮保存 `aisbench_result.csv` 和 `aisbench.log`
 - [ ] 10. 取 3 轮中位数，比较 TPOT / 输出吞吐 / 命中率
 
@@ -533,7 +533,43 @@ python3 aisbench_test.py \
 - `--repeat` 对 prefix_cache 分支**不生效**，重复靠手动多跑几轮；
 - 数据集由 `seed=2` 生成在 `DATASET_PATH`，**几轮之间不要删除、不要换 seed**，保证数据完全一致。
 
-### 7.3 保存结果
+### 7.3 优化覆盖：默认场景测不到全部改动
+
+你改的优化是按 batch size 和命中率分条件生效的，**算子被调用 ≠ 每个优化点都被测到**：
+
+| 优化点 | 生效条件 | 默认场景（32K / cc8 / 命中90%） |
+|---|---|---|
+| 空闲核 helper | `bs ≤ 12` | ✅ 覆盖（cc8 → bs=8） |
+| P0 行划分并行度 | 行数 > 24（即 `bs > 24`） | ❌ 覆盖不到（bs=8） |
+| Opt01 配对排序 / Opt02-04 回写 | 有 selection update | ✅ 覆盖 |
+| Opt05 UB 直写 | 命中率 0~70% 时收益明显 | ⚠️ 90% 命中下覆盖较弱 |
+| 窗口化两阶段 MergeKv | 所有 decode | ✅ 覆盖 |
+
+GLM-5.1 上算子本身没问题（`kv_head_num=1`、`q_head_num>0` 即可，TP16 后 head 数正常），但**只用同事那条 cc8/90% 命令，P0 和 Opt05 的收益基本测不出来**。
+
+建议再补一个针对性场景（单独的 A/B，启动时把 `--max-num-seqs` 调到 32）：
+
+```bash
+python3 aisbench_test.py \
+  --input_len 16384 \
+  --output_len 1024 \
+  --data_num 64 \
+  --concurrency 32 \
+  --request_rate 0 \
+  --npu_num 16 \
+  --dataset_type prefix_cache \
+  --repeat_rate 0.5 \
+  --prefix_test \
+  --seed 2
+```
+
+- `concurrency 32` → decode 时 `bs=32 > 24`，覆盖 P0 行划分；
+- `repeat_rate 0.5` → 命中率 50%，覆盖 Opt05；
+- 16K 输入是为了控制每 chip 的 KV（约 18GB），32K + 50% 命中在 64GB chip 上会很紧。
+
+> 两个场景各自跑一套 ABBA（base/opt 各 3 轮），**同一场景内服务启动参数必须完全一致**，只换算子包。
+
+### 7.4 保存结果
 
 ```bash
 # 每轮跑完立即执行（CSV 是追加写，不搬走会混在一起）
@@ -541,7 +577,7 @@ mv aisbench_result.csv "$AB/results/base_r1.csv"   # 按实际构建/轮次改�
 cp aisbench.log          "$AB/results/base_r1.log"
 ```
 
-### 7.4 轮次安排（ABBA，抵消机器漂移）
+### 7.5 轮次安排（ABBA，抵消机器漂移）
 
 | 顺序 | 构建 | 结果文件 |
 |---|---|---|
@@ -554,7 +590,7 @@ cp aisbench.log          "$AB/results/base_r1.log"
 
 每轮之间建议间隔 1~2 分钟，让 NPU 温度和频率稳定。
 
-### 7.5 结果记录表
+### 7.6 结果记录表
 
 | 轮次 | 构建 | TPOT avg(ms) | TPOT P90(ms) | output_throughput | single_output_throughput | E2E_time(s) | 命中率 | 备注 |
 |---|---|---|---|---|---|---|---|---|
