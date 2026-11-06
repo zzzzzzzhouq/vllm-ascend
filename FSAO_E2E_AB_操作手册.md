@@ -357,12 +357,15 @@ MODEL_NAME   = "glm-5.1"                          # 必须等于 --served-model-
 MODEL_PATH   = "/root/models/GLM-5.1-w4a8"         # 只用来读 tokenizer（与 env.sh 一致）
 HOST_IP      = "127.0.0.1"
 HOST_PORT    = "8000"
-API_KEY      = ""
+API_KEY      = ""            # 本机 vllm serve 没配 --api-key，留空即可
 DEFAULT_PERFORMANCE_TEST = "default_perf"
 OUTPUT_DIR   = "./outputs/default"
 POD_INFO     = []
 URL          = ""
 ```
+
+> `API_KEY` 只有两种情况需要填：你自己启动时加了 `--api-key xxx`，或者服务前面有带鉴权的网关。
+> 手册里的 `vllm serve` 没有鉴权，**留空**，不需要去申请任何 key；压测和 `/metrics` 都能正常访问。
 
 ### 5.3 客户端自检
 
