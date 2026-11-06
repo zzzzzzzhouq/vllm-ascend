@@ -1,5 +1,8 @@
 # FusedSparseAttentionOverlap 整网 E2E A/B 测试操作手册
 
+> 本文是**基线/优化两套包做严格 A/B** 的流程。
+> 如果只需要把 PR #20927 的优化算子接入整网、跑通并采集绝对性能，请看 **[FSAO_整网接入指导手册.md](FSAO_整网接入指导手册.md)**。
+
 > 适用环境：Atlas A3 单机（8 张物理卡 × 2 chip = **16 个逻辑 NPU**，每 chip 64GB，合计 **1TB**）
 > - 推荐 **GLM-5.1-w4a8**（实测 391GB，TP16 后每 chip 约 24.5GB，最稳）
 > - 可试 **GLM-5.2-w4a8**（755GB，TP16 后每 chip 约 47GB，余量较小）
