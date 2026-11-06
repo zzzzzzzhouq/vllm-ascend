@@ -1,8 +1,9 @@
 # FusedSparseAttentionOverlap 整网 E2E A/B 测试操作手册
 
-> 适用环境：Atlas A3 单机 8 卡
-> - 64GB × 8：优先 **GLM-5.2-w4a8**（非 c8），放不下再换 **GLM-5.1-w4a8**；场景用 32K / 64K（见 10.2）
-> - 128GB × 8：可用 **GLM-5.2-w8a8**，场景可上 128K
+> 适用环境：Atlas A3 单机（8 张物理卡 × 2 chip = **16 个逻辑 NPU**，每 chip 64GB，合计 **1TB**）
+> - 推荐 **GLM-5.1-w4a8**（约 200GB，TP16 后每 chip 约 12GB，最稳）
+> - 可试 **GLM-5.2-w4a8**（755GB，TP16 后每 chip 约 47GB，余量较小）
+> - 场景用 32K 起步，64K 视情况；128K 受每 chip KV 限制仍不建议
 > 代码分支：`dsa-a3-opt-only`（基线 `96e222490`，优化 `HEAD`）
 > 目标：验证 `csrc/attention/fused_sparse_attention_overlap` 的 arch22 kernel 优化在整网 decode 上的性能收益
 > 编写日期：2026-11-05
@@ -15,7 +16,7 @@
 - [1. 背景：为什么不能直接起服务](#1-背景为什么不能直接起服务)
 - [2. 变量约定（先填好）](#2-变量约定先填好)
 - [3. 阶段 0：环境盘点](#3-阶段-0环境盘点)
-- [4. 阶段 1：编译基线 / 优化两个算子包](#4-阶段-1编译基线--优化两个算子包)
+- [4. 阶段 1：完整安装与两套完整算子包](#4-阶段-1完整安装与两套完整算子包)
 - [5. 阶段 2：安装压测客户端](#5-阶段-2安装压测客户端)
 - [6. 阶段 3：启动服务并确认算子生效](#6-阶段-3启动服务并确认算子生效)
 - [7. 阶段 4：执行 A/B 测试](#7-阶段-4执行-ab-测试)
@@ -23,8 +24,8 @@
 - [9. 故障排查表](#9-故障排查表)
 - [10. 权重与模型专属问题](#10-权重与模型专属问题glm-51--52)
 - [附录 A：单算子测试复核](#附录-a单算子测试复核)
-- [附录 B：Python 扩展编译（若未做过）](#附录-bpython-扩展编译若未做过)
-- [附录 C：借到 16 卡时的 PD 分离方案](#附录-c借到-16-卡时的-pd-分离方案)
+- [附录 B：Python 扩展编译（备用方案）](#附录-bpython-扩展编译备用方案)
+- [附录 C：16 逻辑 NPU 的 PD 分离方案](#附录-c16-逻辑-npu-的-pd-分离方案)
 - [附录 D：清理与回滚](#附录-d清理与回滚)
 
 ---
@@ -33,10 +34,10 @@
 
 全部在**同一个 docker 容器内**执行。
 
-- [ ] 1. `npu-smi info`、`free -g`、确认每卡显存（65536≈64GB，131072≈128GB），据此选权重
-- [ ] 2. 确认权重：64GB 卡优先 `GLM-5.2-w4a8`（兜底 `GLM-5.1-w4a8`），128GB 卡用 `GLM-5.2-w8a8`；都必须是**非 c8**，`config.json` 有 `index_topk`、无 `compress_ratios`
-- [ ] 3. 编译**基线**算子包 → `~/fsao_ab/ops/base`
-- [ ] 4. 编译**优化**算子包 → `~/fsao_ab/ops/opt`
+- [ ] 1. `npu-smi info -l` 确认逻辑 NPU 数（A3：8 NPU × chipcount 2 = **16**），每 chip 64GB，合计 **1TB**；`free -g` 看 host 内存
+- [ ] 2. 确认权重：优先 `GLM-5.1-w4a8`（最稳），或 `GLM-5.2-w4a8`（755GB，TP16 可试）；必须**非 c8**，`config.json` 有 `index_topk`、无 `compress_ratios`
+- [ ] 3. 编译**基线版完整算子包**（全部 A3 算子，不是单算子）→ `~/fsao_ab/ops/base`
+- [ ] 4. 完整安装并编译**优化版完整算子包** → `~/fsao_ab/ops/opt`
 - [ ] 5. 两个包分别跑仓内单算子测试，均 `4 passed`
 - [ ] 6. 单独 venv 安装 `ais-bench-benchmark`，克隆压测工具、改 `config.py`
 - [ ] 7. 起服务（带 `sparse_kv_offload_config`），`/health` 正常、单请求成功
@@ -61,7 +62,7 @@
 - decode 分发逻辑：`vllm_ascend/attention/sfa_kv_offload.py:1594`
 - 配置默认值：`vllm_ascend/ascend_config.py:1698`
 
-**8 卡为什么只能跑 colocate 调试模式**：生产形态是 PD 分离（P、D 各占一组卡），TP8 + TP8 需要 16 卡。8 卡机器使用代码里预留的单机调试模式：
+**本机 16 个逻辑 NPU（8 物理卡 × 2 chip）**：生产形态是 PD 分离（P、D 各占一组 chip），P TP8 + D TP8 正好用满 16 个逻辑 NPU，理论上可以做。但 PD 需要 memfabric、host pool 和代理进程，配置更复杂；本手册先用代码里预留的单机调试模式：
 
 ```json
 "keep_device_kv_cache": true
@@ -81,17 +82,17 @@
 mkdir -p ~/fsao_ab/results
 cat > ~/fsao_ab/env.sh <<'EOF'
 # ===== 按实际情况修改这三行 =====
-# 64GB 卡首选：/root/models/GLM-5.2-w4a8（确认非 c8；OOM 再换 GLM-5.1-w4a8）
-# 128GB 卡：/root/models/GLM-5.2-w8a8
-export MODEL_PATH=/root/models/GLM-5.2-w4a8        # 权重绝对路径
+# 推荐：/root/models/GLM-5.1-w4a8（非 c8，最稳）
+# 可试：/root/models/GLM-5.2-w4a8（755GB，TP16 下每 chip 约 47GB，余量小）
+export MODEL_PATH=/root/models/GLM-5.1-w4a8        # 权重绝对路径
 export VLLM_SRC=$HOME/vllm-ascend                  # 你的 vllm-ascend 仓库
-export NPU_NUM=8                                   # 本机卡数
+export NPU_NUM=16                                  # 逻辑 NPU 数（8 物理卡 × 2 chip）
 # ==============================
 
 export AB=$HOME/fsao_ab
 export OPS_BASE=$AB/ops/base
 export OPS_OPT=$AB/ops/opt
-export SERVED_NAME=glm-5.2                         # 与 --served-model-name 一致（换 5.1 时同步改）
+export SERVED_NAME=glm-5.1                         # 与 --served-model-name 一致
 export HOST_IP=127.0.0.1
 export PORT=8000
 export DATASET_DIR=/root/dataset
@@ -115,10 +116,18 @@ npu-smi info
 npu-smi info -t memory -i 0          # 看 Memory Size(MB) 一类字段
 python3 - <<'PY'
 import torch, torch_npu
-for i in range(torch.npu.device_count()):
+n = torch.npu.device_count()
+print("逻辑 NPU 数:", n)
+total_all = 0
+for i in range(n):
     free, total = torch.npu.mem_get_info(i)
+    total_all += total
     print(f"NPU {i}: {total/1024**3:.1f} GB  (free {free/1024**3:.1f} GB)")
+print(f"合计 HBM: {total_all/1024**3:.0f} GB")
 PY
+
+#    ⚠️ A3 的一张物理卡通常有 2 个 die，npu-smi 会显示两行/卡。
+#    显存总量必须按“逻辑 NPU 数 × 单卡容量”算，不能用物理卡数 × 单卡容量。
 
 #    板卡型号：
 npu-smi info -t board -i 0 | grep -iE "product|chip|model"
@@ -126,7 +135,7 @@ npu-smi info -t board -i 0 | grep -iE "product|chip|model"
 # 2) 主机内存（决定 dram_size_per_dp_GB；注意这不是卡上的 HBM）
 free -g
 
-# 3) 权重目录与大小（512GB 显存建议 w4 权重目录 ≤ 450GB）
+# 3) 权重目录与大小（16 chip 合计 1TB；755GB 目录约 47GB/chip）
 ls -l "$MODEL_PATH"
 du -sh "$MODEL_PATH"
 
@@ -136,7 +145,7 @@ grep -oE '"(index_topk|compress_ratios|index_kpool)"' "$MODEL_PATH/config.json" 
 #    确认不是 C8 KV（有输出且包含 C8 就是 c8 权重，不能用）
 grep -o '"kv_cache_type"[^,}]*' "$MODEL_PATH/quant_model_description.json" 2>/dev/null
 
-# 5) transformers 版本（GLM-5 系列教程要求 >= 5.2.0）
+# 5) transformers 版本（requirements.txt 固定 5.19.0；GLM-5 教程要求 >= 5.2.0）
 python3 -c "import transformers; print(transformers.__version__)"
 
 # 6) 确认 vllm-ascend 是源码可编辑安装（后面要换 _cann_ops_custom）
@@ -147,11 +156,11 @@ python3 -c "import vllm_ascend; print(vllm_ascend.__file__)"
 
 | 检查项 | 期望 | 不满足怎么办 |
 |---|---|---|
-| 每卡显存 | 128GB 或 64GB | **64GB 不能跑 GLM-5.2-w8a8**；用 5.2-w4a8 / 5.1-w4a8 并缩小场景，见 10.2 |
-| 权重后缀 | 64GB：`GLM-5.2-w4a8` / `GLM-5.1-w4a8`；128GB：`GLM-5.2-w8a8` | 不能用任何 `*c8`（C8 主 KV 被 offload 拒绝） |
+| 逻辑 NPU 数 | 16（8 物理卡 × 2 chip），每 chip 64GB，合计 1TB | 用 `npu-smi info -l` 和 `torch.npu.device_count()` 确认 |
+| 权重后缀 | 优先 `GLM-5.1-w4a8`；可试 `GLM-5.2-w4a8` | 不能用任何 `*c8`（C8 主 KV 被 offload 拒绝） |
 | config.json | 有 `index_topk`，无 `compress_ratios` | 该权重不支持 sparse offload |
 | KV 量化 | `quant_model_description.json` 里不是 `C8` | c8 权重不能用，换非 c8 版本 |
-| 权重体积 | w4 权重目录 ≤ 450GB（8 × 64GB 场景） | 超了换 GLM-5.1-w4a8，或借 16 卡 |
+| 权重体积 | 755GB / 16 chip ≈ 47GB/chip；0.9 利用率下可用约 57.6GB/chip | 余量不足就换 GLM-5.1-w4a8（约 200GB） |
 | 主机内存 | ≥ 200GB 空闲 | 下调 `dram_size_per_dp_GB` |
 | vllm_ascend 路径 | `$VLLM_SRC/vllm_ascend/__init__.py` | 重新执行 `pip install -e .` |
 
@@ -168,9 +177,34 @@ python3 -c "import vllm_ascend; print(vllm_ascend.__file__)"
 
 ---
 
-## 4. 阶段 1：编译基线 / 优化两个算子包
+## 4. 阶段 1：完整安装与两套完整算子包
 
-> 你的分支相对基线只改了 3 个 csrc 文件，**Python 代码完全一致**，所以 A/B 只需要两个算子包，不需要两个镜像、两套 vLLM。
+> ⚠️ **跑模型和跑单算子测试不一样**：单算子测试只需要一个 kernel，而模型会调用 `mla_preprocess`、`sparse_flash_attention`、`moe_gating_top_k`、`grouped_matmul_swiglu_quant`、`dispatch_ffn_combine` 等 **40 个左右**的 A3 自定义算子（完整列表见 `csrc/build_aclnn.sh` 的 `ascend910_93` 分支）。
+>
+> 所以**不能**用 `build.sh --ops=fused_sparse_attention_overlap` 的单算子包来跑模型——其他算子缺失，服务起不来。A/B 需要构建**两套完整包**，两者只有融合算子内核不同。
+
+### 4.0 先检查运行环境（只做一次）
+
+```bash
+cd "$VLLM_SRC"
+python3 -c "import vllm; print('vllm', vllm.__version__)"       # 分支要求 v0.31.0
+python3 -c "import vllm_ascend; print(vllm_ascend.__file__)"     # 必须指向 $VLLM_SRC
+python3 -c "import torch, torch_npu; print(torch.__version__, torch_npu.__version__)"
+```
+
+| 检查项 | 期望 |
+|---|---|
+| vLLM 版本 | `v0.31.0`（见 `.github/vllm-release-tag.commit`） |
+| vllm_ascend 路径 | `$VLLM_SRC/vllm_ascend/__init__.py` |
+| torch / torch_npu | `2.10.0` / `2.10.0.post4`（见 `requirements.txt`） |
+| 依赖 | `memfabric_hybrid`、`memcache_hybrid` 已安装 |
+
+不满足就先补：
+
+```bash
+cd "$VLLM_SRC"
+python3 -m pip install -r requirements.txt
+```
 
 ### 4.1 拉基线代码（worktree，不切分支）
 
@@ -182,7 +216,7 @@ git worktree add ~/vllm-ascend-base 96e222490
 git -C ~/vllm-ascend-base log --oneline -1
 ```
 
-### 4.2 编译环境变量（基线 / 优化两个终端都 source）
+### 4.2 编译环境变量（两个 worktree 都 source）
 
 ```bash
 export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
@@ -192,46 +226,81 @@ export MAX_JOBS=8
 export LD_LIBRARY_PATH="$ASCEND_HOME_PATH/$(uname -m)-linux/devlib:${LD_LIBRARY_PATH:-}"
 ```
 
-### 4.3 编译并安装**基线**包
-
-```bash
-cd ~/vllm-ascend-base
-rm -rf -- csrc/build csrc/output csrc/build_out
-cd csrc
-bash build.sh --pkg --ops=fused_sparse_attention_overlap --soc=ascend910_93
-cd ..
-
-chmod +x csrc/build/cann-ops-transformer*.run
-csrc/build/cann-ops-transformer*.run --install-path="$HOME/fsao_ab/ops/base"
-```
-
-### 4.4 编译并安装**优化**包
+### 4.3 完整安装并构建**优化版**（在 `$VLLM_SRC`，只做一次）
 
 ```bash
 cd "$VLLM_SRC"
 rm -rf -- csrc/build csrc/output csrc/build_out
-cd csrc
-bash build.sh --pkg --ops=fused_sparse_attention_overlap --soc=ascend910_93
-cd ..
 
-chmod +x csrc/build/cann-ops-transformer*.run
-csrc/build/cann-ops-transformer*.run --install-path="$HOME/fsao_ab/ops/opt"
+# COMPILE_CUSTOM_KERNELS=1 是默认值：构建全部 A3 自定义算子 + vllm_ascend_C 扩展
+COMPILE_CUSTOM_KERNELS=1 python3 -m pip install -e . --no-build-isolation
 ```
 
-> ⚠️ **不要**在 `~/vllm-ascend-base` 里执行 `pip install -e .`。Python 包必须始终指向 `$VLLM_SRC`（HEAD），基线只取它的算子二进制。
+这一步内部会调用 `csrc/build_aclnn.sh`，把**完整算子包**装到
+`$VLLM_SRC/vllm_ascend/_cann_ops_custom`。首次构建时间较长（常见 30 分钟以上），建议放在 tmux / nohup 里跑。
+
+> 构建前确认磁盘空间：`df -h "$VLLM_SRC"`，全量算子构建的 `csrc/build` 可能占用几十 GB，建议预留 ≥ 100GB。
+>
+> 如果 `pip install -e .` 在构建全量算子时失败，可以拆成两步：
+> 1. `bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"`（构建完整算子包）；
+> 2. 按[附录 B](#附录-bpython-扩展编译备用方案)单独构建 `vllm_ascend_C` 扩展。
+
+验收并保存为优化版：
+
+```bash
+cd "$VLLM_SRC"
+ls vllm_ascend/_cann_ops_custom/vendors/custom_transformer/
+
+python3 - <<'PY'
+import torch, vllm_ascend
+from vllm_ascend.utils import enable_custom_op
+enable_custom_op()
+assert hasattr(torch.ops._C_ascend, "npu_fused_sparse_attention_overlap")
+print("算子加载成功")
+PY
+
+rm -rf "$OPS_OPT"
+cp -a "$VLLM_SRC/vllm_ascend/_cann_ops_custom" "$OPS_OPT"
+```
+
+### 4.4 构建**基线版完整算子包**（在 worktree，不重装 Python）
+
+```bash
+cd ~/vllm-ascend-base
+
+# worktree 不会自动带 submodule；从主树拷过来
+if [ ! -d csrc/third_party/catlass/include ]; then
+  cp -a "$VLLM_SRC/csrc/third_party/catlass" csrc/third_party/
+fi
+
+rm -rf -- csrc/build csrc/output csrc/build_out
+
+# build_aclnn.sh 会先清空 vllm_ascend/_cann_ops_custom，再安装完整的 A3 算子集
+bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"
+
+rm -rf "$OPS_BASE"
+cp -a "$PWD/vllm_ascend/_cann_ops_custom" "$OPS_BASE"
+```
+
+> ⚠️ **不要**在 `~/vllm-ascend-base` 里执行 `pip install -e .`。Python 包和 `vllm_ascend_C` 扩展始终用 `$VLLM_SRC`（HEAD）那份，基线只取它的完整算子包。
 
 ### 4.5 验收
 
 ```bash
-# 两个包目录结构应一致
-ls ~/fsao_ab/ops/base/vendors/custom_transformer/
-ls ~/fsao_ab/ops/opt/vendors/custom_transformer/
+# 两套都应是完整的 vendor 目录，文件数量应接近（都包含全部 A3 算子）
+du -sh "$OPS_BASE" "$OPS_OPT"
+find "$OPS_BASE" -type f | wc -l
+find "$OPS_OPT" -type f | wc -l
 
-# 产物应有差异（证明是两个不同二进制）
-diff -rq ~/fsao_ab/ops/base ~/fsao_ab/ops/opt | head -20
+# 差异应只集中在 fused_sparse_attention_overlap 相关产物
+diff -rq "$OPS_BASE" "$OPS_OPT" | head -20
 ```
 
-再用[附录 A](#附录-a单算子测试复核)分别在两个包下跑单算子测试，均应为 `4 passed`。
+如果差异铺满整个目录（几万个文件），说明两次构建的算子集不一致，回到 4.3/4.4 重做。
+
+再用[附录 A](#附录-a单算子测试复核)分别在两套包下跑单算子测试，均应为 `4 passed`。
+
+> 验证“完整”：`ls "$OPS_OPT/vendors/custom_transformer/op_impl"` 和在主树上 `python3 -c "import torch; ..."` 调用几个常用算子（如 `npu_mla_preprocess`）不应报 “operator not found”。
 
 ### 4.6 切换机制（重要）
 
@@ -284,8 +353,8 @@ cd aisbench_auto_tools_prefix
 ```python
 DATASET_PATH = "/root/dataset"                     # 阶段 2 已建好
 WORK_PATH    = "<5.1 打印的目录>"                   # 目录下要有 ais_bench/
-MODEL_NAME   = "glm-5.2"                          # 必须等于 --served-model-name
-MODEL_PATH   = "/root/models/GLM-5.2-w4a8"         # 只用来读 tokenizer（与 env.sh 一致）
+MODEL_NAME   = "glm-5.1"                          # 必须等于 --served-model-name
+MODEL_PATH   = "/root/models/GLM-5.1-w4a8"         # 只用来读 tokenizer（与 env.sh 一致）
 HOST_IP      = "127.0.0.1"
 HOST_PORT    = "8000"
 API_KEY      = ""
@@ -328,14 +397,14 @@ source "$VLLM_SRC/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/se
 unset http_proxy https_proxy
 ```
 
-### 6.2 启动命令（64GB × 8：GLM-5.2-w4a8 优先，GLM-5.1-w4a8 兜底）
+### 6.2 启动命令（16 逻辑 NPU：GLM-5.1-w4a8，colocate 调试模式）
 
 建议用 tmux 开两个窗口：一个跑服务，一个跑压测。
 
 ```bash
 source ~/fsao_ab/env.sh
 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export HCCL_BUFFSIZE=200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -348,7 +417,7 @@ vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 --port "$PORT" \
   --served-model-name "$SERVED_NAME" \
   --data-parallel-size 1 \
-  --tensor-parallel-size 8 \
+  --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --max-num-seqs 8 \
   --max-model-len 40960 \
@@ -372,7 +441,7 @@ vllm serve "$MODEL_PATH" \
   }' 2>&1 | tee "$AB/results/server_$(date +%m%d_%H%M).log"
 ```
 
-> **128GB × 8 + GLM-5.2-w8a8 时**可放宽为：
+> **如果换到每 chip 128GB 的机器**（GLM-5.2-w8a8 场景）可放宽为：
 > `--max-model-len 140000 --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95`，
 > `dram_size_per_dp_GB` 设 80。其余不变。
 
@@ -382,7 +451,7 @@ vllm serve "$MODEL_PATH" \
 |---|---|
 | 不要 `--kv-cache-dtype int8/fp8` | 主 KV 会变成 C8 packed cache，sparse offload 直接拒绝 |
 | 不要 `enable_dsa_cp` | sparse offload 不支持 context parallel，会 `NotImplementedError` |
-| `--data-parallel-size 1` | 8 卡单机，DP2×TP8 是 16 卡配置 |
+| `--data-parallel-size 1` | 本机为 16 逻辑 NPU，用 DP1 + TP16 用满；DP2×TP8 也是 16 卡组合，但本方案不用 |
 | 权重不能带 `c8` | `w8a8c8` / `w4a8c8` 均被拒 |
 | 第一次先不加 `--speculative-config` | MTP 支持但先减少变量，跑通后再加 |
 
@@ -401,7 +470,7 @@ curl -s http://$HOST_IP:$PORT/metrics | grep prefix_cache | head
 # 4) 发一条短请求
 curl -s http://$HOST_IP:$PORT/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
+  -d '{"model":"glm-5.1","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
 ```
 
 ### 6.4 如何证明算子真的在跑
@@ -440,26 +509,26 @@ python3 aisbench_test.py \
   --data_num 32 \
   --concurrency 8 \
   --request_rate 0 \
-  --npu_num 8 \
+  --npu_num 16 \
   --dataset_type prefix_cache \
   --repeat_rate 0.9 \
   --prefix_test \
   --seed 2
 ```
 
-**场景选择（8 × 64GB + GLM-5.2-w4a8 / GLM-5.1-w4a8）**：
+**场景选择（16 逻辑 NPU × 64GB = 1TB + GLM-5.1-w4a8）**：
 
 | 场景 | 命令参数 | 说明 |
 |---|---|---|
 | 首选 | `--input_len 32768 --data_num 32` | 显存最稳，先出 A/B 结论 |
 | 加长 | `--input_len 65536 --data_num 16` | KV 约为首选 1.8 倍，需确认不 OOM |
-| 128K | `--input_len 131072 --data_num 32` | **8 × 64GB 放不下**（见 10.2），不要照搬同事的 16 卡命令 |
+| 128K | `--input_len 131072 --data_num 32` | 不建议：每 chip 仍要放完整 KV（约 45GB），加上权重和激活容易超 64GB |
 
-> 同事原命令的 `--input_len 131072` 是按 16 卡 / 128GB 卡环境给的，直接搬到 8 × 64GB 会 OOM 或命中率骤降。
+> 同事原命令的 `--input_len 131072` 依赖的是“每 chip KV 放得下”，和卡数多少无关；在 64GB chip 上先跑 32K。
 
 说明：
 
-- `--npu_num 8`：本机 8 卡（同事原命令的 16 是按他的机器算单卡吞吐）；
+- `--npu_num 16`：本机 16 个逻辑 NPU（8 物理卡 × 2 chip）；
 - `--prefix_test`：先把前缀预热一遍，保证全量测试时命中率接近 90%；
 - `--repeat` 对 prefix_cache 分支**不生效**，重复靠手动多跑几轮；
 - 数据集由 `seed=2` 生成在 `DATASET_PATH`，**几轮之间不要删除、不要换 seed**，保证数据完全一致。
@@ -522,7 +591,7 @@ PY
 |---|---|---|
 | `TPOT avg` / `TPOT SLO_P90` | **下降** | 算子每个 decode step 都执行，是最直接的表征 |
 | `output_throughput` | **上升** | 端到端吞吐 |
-| `single_output_throughput` | **上升** | 单卡吞吐（除以 8） |
+| `single_output_throughput` | **上升** | 单 chip 吞吐（除以 16） |
 | `E2E_time` | 下降 | 整轮耗时 |
 | `TTFT avg` | 基本不变 | 算子在 decode，prefill 影响很小 |
 | 打屏命中率 | ≈ 90% | 明显偏低说明 KV 容量不足，结果不可信 |
@@ -543,10 +612,10 @@ PY
 | `does not support packed SFA main caches (C8 or TQ4)` | 用了 c8 权重或 `--kv-cache-dtype int8/fp8` | 换非 c8 权重，删掉 `--kv-cache-dtype` |
 | `Sparse KV offload currently requires TP without context parallelism` | 打开了 `enable_dsa_cp` 或 PCP/DCP | 从 `additional-config` 删掉 `enable_dsa_cp`，CP 参数保持 1 |
 | `Sparse KV offload don't support compress now` | 权重 config 有 `compress_ratios` | 换 GLM-5.2 / GLM-5.1 的标准 DSA 权重 |
-| `nodename nor servname provided` / 找不到算子 | `_cann_ops_custom` 没换或没重启 | 重新换目录、重启进程、开新终端 |
+| 找不到算子 / `libcust_opapi.so` 加载失败 | `_cann_ops_custom` 没换、只装了单算子包，或服务没重启 | 按 4.6 换完整包、重启进程、开新终端 |
 | `/metrics` 查不到 `prefix_cache` | 代理未关 / 多进程指标目录未设 | `unset http_proxy https_proxy`；设置 `PROMETHEUS_MULTIPROC_DIR` |
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删除该参数 |
-| 启动 OOM | 128K + 8 并发 + 图模式内存不够 | 降 `--max-model-len`（先 65536 验证流程）、降 `--max-num-seqs`、或去掉 `--compilation-config` |
+| 启动 OOM | 权重 + KV + 图内存超过 64GB/chip | 降 `--max-model-len` / `--max-num-seqs` / `--max-num-batched-tokens`，或去掉 `--compilation-config`、换 GLM-5.1-w4a8 |
 | 命中率远低于 90% | host pool 太小导致 block 被换出 | 提高 `dram_size_per_dp_GB`（host 内存允许时）或降低并发 |
 | 图模式启动失败 | 该路径图捕获有问题 | 加 `--enforce-eager` 先跑通（A/B 两端保持一致即可） |
 
@@ -556,21 +625,32 @@ PY
 
 ### 10.1 GLM-5.2-w8a8 可以吗？
 
-**只在 128GB 卡上可以。** 它是官方文档列出的 **1 台 Atlas 800 A3（128GB × 8）** 部署配置；`npu-smi` 显示 `65536` 说明是 64GB 卡，权重本身就放不下，不能用。
+官方文档给出的最低配置是 **1TB HBM**（1 台 A3 128GB×8，或 2 台 A2 64GB×8）。你的机器是 **16 逻辑 NPU × 64GB = 1TB**，刚好达到下限，但余量取决于实际权重目录大小：
 
-如果能换到 128GB × 8 机器，注意：
+- 先 `du -sh` 实测；如果权重 ≥ 800GB，每 chip 只剩不到 15GB 给 KV/激活，32K 场景也很危险；
+- 打开 offload 时同样要删掉 `enable_dsa_cp`，且不能用 c8 版本。
 
-- **w8a8 是权重量化，不影响 KV cache dtype**；不加 `--kv-cache-dtype` 主 KV 就是 BF16，满足 sparse offload；
-- 不能用 `GLM-5.2-w8a8c8` / `w4a8c8`（C8 主 KV 会被拒）；
-- 团队 GLM-5.2 命令默认带 `enable_dsa_cp`，打开 offload 时必须删掉。
+结论：**理论可达下限，但非常紧，不推荐作为首选**。
 
-### 10.2 本机是 64GB 卡（8 × 64GB = 512GB）怎么办
+### 10.2 本机拓扑：16 逻辑 NPU × 64GB = 1TB
 
-按优先级选权重：
+先纠正一个最容易算错的地方：
 
-1. **`GLM-5.2-w4a8`（首选，你已有）**：w4 权重比 w8 小，512GB 有机会放下；但官方部署表没有单独列它，属于“官方支持的模型 + 未单列的量化版本”，必须先用 32K 场景实测显存；
-2. **`GLM-5.1-w4a8`（兜底）**：官方明确支持 64GB × 8 单机部署，最稳；
-3. `GLM-5.2-w8a8`：需要 128GB × 8，本机放不下。
+- `npu-smi info -l` 显示 **8 个 NPU**、每个 `chipcount = 2` → 实际是 **16 个逻辑 NPU**；
+- 每个 chip 的 HBM 为 `65536 MB = 64 GiB` → 合计 `16 × 64 = 1024 GiB = 1TB`；
+- 所以 **TP 要设 16**，`ASCEND_RT_VISIBLE_DEVICES=0..15`，不能按“8 张物理卡 × 64GB = 512GB”来算。
+
+权重预算（每 chip；`--gpu-memory-utilization 0.90` 时可用约 57.6 GiB/chip）：
+
+| 权重 | `du -sh` 实测 | 每 chip 权重 | 剩给 KV/激活 | 结论 |
+|---|---|---|---|---|
+| `GLM-5.1-w4a8` | 约 200GB | 约 12.5GB | 约 45GB | ✅ 最稳，首选 |
+| `GLM-5.2-w4a8` | 755GB | 约 47GB | 约 10GB | ⚠️ 32K 可试，可能 OOM |
+| `GLM-5.2-w8a8` | 需实测（文档下限 1TB） | 可能 > 50GB | 很小 | ⚠️ 不推荐 |
+
+> 注意：TP16 只分摊**权重**；MLA 的 KV 在 TP rank 之间是复制的，每个 chip 仍要放一份完整 KV。
+>
+> 另外区分：`dram_size_per_dp_GB` 用的是**host 内存**，不是这里的 1TB HBM。
 
 无论用哪个，都必须确认是**非 c8** 且主 KV 为 BF16（见 10.3）。
 
@@ -579,11 +659,11 @@ PY
 同时必须**缩小测试场景**，不能照搬同事的 128K / 16 卡命令。原因：
 
 - 用 `keep_device_kv_cache=true` 时，device 上仍保留完整 paged KV，且 MLA 的 KV 在 TP rank 之间是**复制**的，每张卡都要放一份；
-- 64GB 卡要同时装下：权重（w4a8 约 20~30GB/卡）+ KV（每卡一份）+ 激活 / 图内存（约 10GB）。
+- 每个 64GB chip 要同时装下：权重（GLM-5.1-w4a8 约 12.5GB/chip；GLM-5.2-w4a8 约 47GB/chip）+ KV（每 chip 一份）+ 激活 / 图内存（约 10GB）。
 
 显存预算参考（按 MLA 每 token 约 70~90KB 估算；GLM-5.2 层数可能与 5.1 不同，以实测 `npu-smi info` 为准）：
 
-| 场景 | 唯一 token 数（90% 前缀共享） | 每卡 KV | 结论 |
+| 场景 | 唯一 token 数（90% 前缀共享） | 每 chip KV | 结论 |
 |---|---|---|---|
 | 32K × 32 请求 | ≈ 13 万 | ≈ 10GB | ✅ 首选 |
 | 64K × 16 请求 | ≈ 16 万 | ≈ 13GB | ✅ 可以试 |
@@ -594,7 +674,7 @@ PY
 
 其他选择：
 
-- 借 16 卡 / 128GB 卡环境，按同事的原命令跑 128K（见附录 C）；
+- 换到每 chip 128GB 的机器（或增加节点），按同事的原命令跑 128K（见附录 C）；
 - 不建议把 `GLM-5.2-w4a8c8` 强行降到 BF16 KV 来省显存——C8 与 sparse offload 互斥，且这是未验证组合。
 
 ### 10.3 w4a8 与 w4a8c8 的区别（重要）
@@ -603,10 +683,10 @@ PY
 
 | 权重名 | 含义 | 能否用于本次 E2E |
 |---|---|---|
-| `GLM-5.2-w8a8` | W8A8 权重，主 KV 由 `--kv-cache-dtype` 决定（默认 BF16） | ✅ 但仅限 128GB × 8 |
-| `GLM-5.2-w4a8` | W4A8 权重，主 KV 默认 BF16 | ✅ 64GB × 8 首选，需实测显存 |
+| `GLM-5.2-w8a8` | W8A8 权重，主 KV 由 `--kv-cache-dtype` 决定（默认 BF16） | ⚠️ 文档下限 1TB；本机刚好达到，余量取决于实际体积，不推荐 |
+| `GLM-5.2-w4a8` | W4A8 权重，主 KV 默认 BF16；**实测约 755GB** | ⚠️ TP16 下约 47GB/chip，32K 可试，余量小 |
 | `GLM-5.2-w4a8c8` | W4A8 权重 + **C8 主 KV cache** | ❌ C8 与 sparse offload 互斥 |
-| `GLM-5.1-w4a8` | W4A8 权重，主 KV 默认 BF16 | ✅ 最稳兜底（官方 64GB × 8） |
+| `GLM-5.1-w4a8` | W4A8 权重，主 KV 默认 BF16 | ✅ 最稳（官方 64GB × 8 配置） |
 
 名字里的 `c8` 指的是 **KV cache 量化**，不是权重。C8 模型的 checkpoint 里带 `kv_cache_scale`，运行时需要 `--kv-cache-dtype int8`；而一旦 cache dtype 是 int8/fp8：
 
@@ -627,9 +707,12 @@ Sparse KV offload does not support packed SFA main caches (C8 or TQ4).
 
 ```bash
 python3 - <<'PY'
-import json, os
+import os
 p = os.path.join(os.environ["MODEL_PATH"], "quant_model_description.json")
-print("存在 kv_cache_type=C8:", "kv_cache_type" in open(p).read() and "C8" in open(p).read())
+if not os.path.exists(p):
+    print("没有 quant_model_description.json（一般是非量化的 BF16 权重）")
+else:
+    print("存在 kv_cache_type=C8:", "C8" in open(p).read())
 PY
 ```
 
@@ -651,11 +734,35 @@ grep -oE '"(index_topk|compress_ratios|index_kpool)"' "$MODEL_PATH/config.json" 
 | `--speculative-config`（MTP） | 支持，但第一次先去掉；跑通后再加回来重测 |
 | `--compilation-config FULL_DECODE_ONLY` | 支持；失败时退回 `--enforce-eager` |
 
+### 10.6 DeepSeek-V4 / V4.1-Flash 能用吗？——不能
+
+即使权重体积够小（例如 V4.1-Flash 看到约 149GB），也**不能**用于本算子的 E2E：
+
+1. **架构不同**：V4.1-Flash 用的是 CSA2（Compressed Sparse Attention 2）+ FP4 主 KV，不是 SFA 的 BF16 主 KV；它走 `vllm_ascend/attention/dsa_v41.py`，不走 `sfa_kv_offload.py`。
+2. **配置直接被拒**：它的 config 带 `compress_ratios`，而 sparse KV offload 明确拒绝：
+
+   ```python
+   # vllm_ascend/ascend_config.py:1738
+   if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
+       raise ValueError("Sparse KV offload don't support compress now.")
+   ```
+
+3. **SFA backend 不会被选中**：`vllm_ascend/utils.py:206` 的 `model_uses_sfa_sparse()` 在检测到 `compress_ratios` 时返回 False。
+
+结论：`npu_fused_sparse_attention_overlap` **根本不会被调用**，A/B 测不出任何差异。本算子目前只适用于 SFA + sparse KV offload 路径，即 **GLM-5.1 / GLM-5.2（非 c8）/ DeepSeek-V3.2**。
+
+一条命令判断权重是否可用：
+
+```bash
+grep -c '"compress_ratios"' "$MODEL_PATH/config.json"
+# 输出 0 → 可以；>=1 → 不行
+```
+
 ---
 
 ## 附录 A：单算子测试复核
 
-对每个算子包都要验证一次（先切包，再跑）：
+对每个算子包都要验证一次：**先按 4.6 切到目标包**，再执行下面的命令。
 
 ```bash
 source ~/fsao_ab/env.sh
@@ -679,10 +786,15 @@ VLLM_USE_MODELSCOPE=true pytest -sv \
 
 ---
 
-## 附录 B：Python 扩展编译（若未做过）
+## 附录 B：Python 扩展编译（备用方案）
 
-如果你已经能跑通单算子测试，本节可跳过。完整步骤见仓库里的
-`FUSED_SPARSE_ATTENTION_OVERLAP_ONLY_GUIDE.md` 第 7~10 步，摘要：
+当 `COMPILE_CUSTOM_KERNELS=1 pip install -e .` 在构建全量算子阶段失败，或你只需要补 `vllm_ascend_C` 扩展时，用本节。
+
+> 前提：完整算子包已经通过 `bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"` 构建到 `vllm_ascend/_cann_ops_custom`。
+> 这里 `COMPILE_CUSTOM_KERNELS=0` 是**故意**的——只重装 Python 包并编译扩展，不再重建算子。
+> 如果 `_cann_ops_custom` 里没有算子，先回到 4.3。
+
+完整步骤见仓库里的 `FUSED_SPARSE_ATTENTION_OVERLAP_ONLY_GUIDE.md` 第 7~10 步，摘要：
 
 ```bash
 cd "$VLLM_SRC"
@@ -709,11 +821,16 @@ cmake --install "$EXT_BUILD_DIR"
 
 ---
 
-## 附录 C：借到 16 卡时的 PD 分离方案
+## 附录 C：16 逻辑 NPU 的 PD 分离方案
 
-8 卡做不了生产的 PD 分离。如果能借到 16 卡机器，按官方文档部署：
+本机 16 个逻辑 NPU 正好可以切成 **P TP8（chip 0-7）+ D TP8（chip 8-15）**。前提是**每个实例都要加载完整权重**：
 
-- Prefill（8 卡）：
+- `GLM-5.1-w4a8`（约 200GB）→ 每侧 8 × 64GB = 512GB，放得下 ✅
+- `GLM-5.2-w4a8`（755GB）→ 每侧 512GB 放不下 ❌（这种情况只能用 TP16 colocate）
+
+PD 需要额外的 memfabric 配置和代理进程；如果只是做算子 A/B，优先用第 6 节的 colocate 调试模式。
+
+- Prefill（`ASCEND_RT_VISIBLE_DEVICES=0-7`，`--tensor-parallel-size 8`）：
   ```bash
   --kv-transfer-config '{
     "kv_connector": "SfaRemoteD2HConnector",
@@ -722,7 +839,7 @@ cmake --install "$EXT_BUILD_DIR"
   ```
   不设置 `sparse_kv_offload_config`。
 
-- Decode（8 卡）：
+- Decode（`ASCEND_RT_VISIBLE_DEVICES=8-15`，`--tensor-parallel-size 8`）：
   ```bash
   --additional-config '{
     "sparse_kv_offload_config": {
