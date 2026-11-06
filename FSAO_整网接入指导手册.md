@@ -59,7 +59,7 @@
 - [ ] 6. 启动整网服务（带 `sparse_kv_offload_config` + `use_fused_overlap=true`）
 - [ ] 7. 验证 `/health`、`/metrics` 和一条 decode 请求，确认算子路径生效
 - [ ] 8. 跑 3 轮压测，记录 TPOT / 输出吞吐 / 命中率
-- [ ] 9. （可选）跑补充场景，覆盖 P0 行划分和 Opt05
+- [ ] 9. 默认场景已覆盖 helper + Opt01~05 + MergeKv；如需 P0 数据，再跑 9.2 的大 batch 场景
 
 ---
 
@@ -440,7 +440,23 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 
 ## 9. 压测与记录
 
-### 9.1 默认场景（覆盖 helper）
+### 9.1 默认场景：一次覆盖 helper + Opt01~05 + MergeKv
+
+**没有**任何单一 batch size 能同时覆盖 helper 和 P0：
+
+- helper 的门控是 `bs ≤ 12`；
+- P0 的收益条件是 `bs > 24`（行数超过 24 才能用满 48 个 subcore）。
+
+所以默认场景选择 `bs=8` + 命中率 50%，一次覆盖除 P0 外的全部优化：
+
+| 优化点 | 生效条件 | 本场景 |
+|---|---|---|
+| 空闲核 helper | `bs ≤ 12` | ✅ bs=8 |
+| Opt01 配对排序 | 有 selection update | ✅ |
+| Opt02~04 回写路径 | 有 selection update | ✅ |
+| Opt05 UB 直写 | 命中率 0~70% 收益明显 | ✅ 50% |
+| 窗口化两阶段 MergeKv | 所有 decode | ✅ |
+| **P0 行划分** | `bs > 24` | ❌ 需单独场景（9.2） |
 
 ```bash
 source /home/z00943842/base/fsao_ab/env.sh
@@ -456,20 +472,18 @@ python3 aisbench_test.py \
   --request_rate 0 \
   --npu_num 16 \
   --dataset_type prefix_cache \
-  --repeat_rate 0.9 \
+  --repeat_rate 0.5 \
   --prefix_test \
   --seed 2
 ```
 
-### 9.2 补充场景（覆盖 P0 / Opt05）
+显存核算：`cc8` 时活跃请求只有 8 个。50% 命中下唯一 token 约 `16.4k + 8 × 16.4k ≈ 14.8 万`，按 80KB/token 约 12GB/chip；加上 24.5GB 权重和激活，能放进 64GB chip。跑完整 32 条时，已完成请求的尾部 KV 可能被换出，但共享前缀会留在缓存里，命中率仍约 50%。
 
-默认 cc8/90% 场景 `bs=8`，只覆盖 helper 和通用回写；PR 里的两项收益需要：
+### 9.2 P0 为什么不能放进同一场景
 
-| 优化点 | 生效条件 | 场景 |
-|---|---|---|
-| helper | `bs ≤ 12` | 默认 cc8 |
-| P0 行划分 | `bs > 24` | cc32 |
-| Opt05 UB 直写 | 命中率 0~70% | repeat_rate 0.5 |
+`bs` 不可能同时满足 `≤12`（helper）和 `>24`（P0）。在 `bs ≤ 12` 时，P0 的新代码路径（`workerCount = GetBlockNum() * 2`）**仍会执行**，但因为行数少于 worker 数，收益体现不出来。
+
+如果评审需要 P0 的整网数据，单独跑这一组（启动时把 `--max-num-seqs` 调到 32）：
 
 ```bash
 python3 aisbench_test.py \
@@ -485,7 +499,11 @@ python3 aisbench_test.py \
   --seed 2
 ```
 
-> 跑这个场景时把服务的 `--max-num-seqs` 调到 32，并重启。
+- `bs=32 > 24` → 覆盖 P0；
+- 50% 命中 → 同时覆盖 Opt05；
+- 但 `bs>12`，helper 不生效。
+
+> 如果只关心“优化代码是否都执行过”，默认场景已经让 P0 的代码路径执行；如果关心 P0 的**性能收益**，必须用 9.2 的大 batch 场景。
 
 ### 9.3 保存结果
 
@@ -500,11 +518,11 @@ cp aisbench.log          "$AB/results/default_r1.log"
 
 | 场景 | 轮次 | TPOT avg(ms) | TPOT P90(ms) | output_throughput | single_output_throughput | E2E_time(s) | 命中率 |
 |---|---|---|---|---|---|---|---|
-| 默认 32K/cc8/90% | 1 | | | | | | |
+| 默认 32K/cc8/50%（helper+小优化） | 1 | | | | | | |
 | | 2 | | | | | | |
 | | 3 | | | | | | |
 | | **中位数** | | | | | | |
-| 补充 16K/cc32/50% | 1 | | | | | | |
+| P0 场景 16K/cc32/50% | 1 | | | | | | |
 | | 2 | | | | | | |
 | | 3 | | | | | | |
 | | **中位数** | | | | | | |
@@ -514,7 +532,7 @@ cp aisbench.log          "$AB/results/default_r1.log"
 ```bash
 python3 - <<'PY'
 import pandas as pd, glob
-for tag in ("default", "supplement"):
+for tag in ("default", "p0"):
     files = glob.glob(f"{tag}_r*.csv")
     if not files:
         continue
@@ -591,7 +609,7 @@ grep -c '"compress_ratios"' "$MODEL_PATH/config.json"
 
 | 场景 | 说明 |
 |---|---|
-| 32K × 32 请求 | 首选，先出结论 |
+| 32K × 32 请求 | 首选；默认用 `repeat_rate 0.5` 覆盖 Opt05 |
 | 64K × 16 请求 | 可以试 |
 | 128K × 32 请求 | 不建议，每 chip KV 约 45GB + 权重容易超 64GB |
 
