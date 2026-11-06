@@ -444,7 +444,7 @@ unset http_proxy https_proxy
 source /home/z00943842/base/fsao_ab/env.sh
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export HCCL_BUFFSIZE=200
+export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics
@@ -694,6 +694,7 @@ PY
 | `ModuleNotFoundError: No module named 'orjson'`（或其它 vllm 依赖） | `vllm` 命令使用的 Python 环境缺少 vLLM 依赖 | 用 `vllm` 入口同一个解释器安装：`/usr/local/python3.12.16/bin/python3 -m pip install orjson`；缺得多就装 `-r /vllm-workspace/vllm/requirements/common.txt`（**不要**装 `cuda.txt`） |
 | `hcclGetRootInfo ... error code is 19 (call network api fail)` / `ERR02200 DIST call hccl api failed` | HCCL 选网卡失败、hostname 解析不到，或上次崩溃残留 | 设 `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`（用 `ip -o -4 addr show \| grep <本机IP>` 找网卡）；`/etc/hosts` 补 hostname；清理残留进程；`/dev/shm` ≥ 1GB |
 | `HCCL_INTRA_PCIE_ENABLE or HCCL_INTRA_ROCE_ENABLE is invalid (EmptyString or 0 ... not both 1)` | 只设了 `HCCL_INTRA_ROCE_ENABLE=0`，而 `HCCL_INTRA_PCIE_ENABLE` 为空 | 两个都 `unset`（自动选择）；或显式 `HCCL_INTRA_PCIE_ENABLE=1` + `HCCL_INTRA_ROCE_ENABLE=0`。两者不能同时为 1 |
+| `HCCL_BUFFSIZE_EP is too SMALL ... NEEDED_HCCL_BUFFSIZE=... actual CCL_BUFFSIZE=...`，随后 `vector core exception` / `aclnnMoeDistributeCombineV4 failed` | `HCCL_BUFFSIZE` 小于 MoE AllToAll 所需（常见需 ~206MB 以上） | 把 `HCCL_BUFFSIZE` 单位 MB 调大，例如 `export HCCL_BUFFSIZE=512`，重启服务 |
 | `Loading safetensors checkpoint shards: 0%` 长时间不动 | 391GB 权重从 NFS 加载，首次没有 page cache | 通常是正常的，等；用 `cat /proc/<pid>/io` 看 `read_bytes` 是否增长，NFS 0.3~1GB/s 需要 7~20 分钟 |
 | 权重已上卡但日志停在编译/图捕获 | `FULL_AND_PIECEWISE` 图捕获在 391GB 权重 + TP8 下很慢或 OOM | 加 `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`，或 `--enforce-eager`；E2E 用 TP16 |
 | 加载完初始化 KV 时 OOM | TP8 下每 chip 权重约 49GB，只剩约 8GB 给 KV/激活 | 改用 `-tp 16`（每 chip 约 24.5GB） |
