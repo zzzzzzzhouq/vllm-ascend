@@ -1,7 +1,7 @@
 # FusedSparseAttentionOverlap 整网 E2E A/B 测试操作手册
 
 > 适用环境：Atlas A3 单机（8 张物理卡 × 2 chip = **16 个逻辑 NPU**，每 chip 64GB，合计 **1TB**）
-> - 推荐 **GLM-5.1-w4a8**（约 200GB，TP16 后每 chip 约 12GB，最稳）
+> - 推荐 **GLM-5.1-w4a8**（实测 391GB，TP16 后每 chip 约 24.5GB，最稳）
 > - 可试 **GLM-5.2-w4a8**（755GB，TP16 后每 chip 约 47GB，余量较小）
 > - 场景用 32K 起步，64K 视情况；128K 受每 chip KV 限制仍不建议
 > 代码分支：`dsa-a3-opt-only`（基线 `96e222490`，优化 `HEAD`）
@@ -170,7 +170,7 @@ python3 -c "import vllm_ascend; print(vllm_ascend.__file__)"
 | 权重后缀 | 优先 `GLM-5.1-w4a8`；可试 `GLM-5.2-w4a8` | 不能用任何 `*c8`（C8 主 KV 被 offload 拒绝） |
 | config.json | 有 `index_topk`，无 `compress_ratios` | 该权重不支持 sparse offload |
 | KV 量化 | `quant_model_description.json` 里不是 `C8` | c8 权重不能用，换非 c8 版本 |
-| 权重体积 | 755GB / 16 chip ≈ 47GB/chip；0.9 利用率下可用约 57.6GB/chip | 余量不足就换 GLM-5.1-w4a8（约 200GB） |
+| 权重体积 | 755GB / 16 chip ≈ 47GB/chip；0.9 利用率下可用约 57.6GB/chip | 余量不足就换 GLM-5.1-w4a8（实测 391GB，约 24.5GB/chip） |
 | 主机内存 | ≥ 200GB 空闲 | 下调 `dram_size_per_dp_GB` |
 | vllm_ascend 路径 | `$VLLM_SRC/vllm_ascend/__init__.py` | 重新执行 `pip install -e .` |
 
@@ -694,7 +694,10 @@ PY
 | `ModuleNotFoundError: No module named 'orjson'`（或其它 vllm 依赖） | `vllm` 命令使用的 Python 环境缺少 vLLM 依赖 | 用 `vllm` 入口同一个解释器安装：`/usr/local/python3.12.16/bin/python3 -m pip install orjson`；缺得多就装 `-r /vllm-workspace/vllm/requirements/common.txt`（**不要**装 `cuda.txt`） |
 | `hcclGetRootInfo ... error code is 19 (call network api fail)` / `ERR02200 DIST call hccl api failed` | HCCL 选网卡失败、hostname 解析不到，或上次崩溃残留 | 设 `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`（用 `ip -o -4 addr show \| grep <本机IP>` 找网卡）；`/etc/hosts` 补 hostname；清理残留进程；`/dev/shm` ≥ 1GB |
 | `HCCL_INTRA_PCIE_ENABLE or HCCL_INTRA_ROCE_ENABLE is invalid (EmptyString or 0 ... not both 1)` | 只设了 `HCCL_INTRA_ROCE_ENABLE=0`，而 `HCCL_INTRA_PCIE_ENABLE` 为空 | 两个都 `unset`（自动选择）；或显式 `HCCL_INTRA_PCIE_ENABLE=1` + `HCCL_INTRA_ROCE_ENABLE=0`。两者不能同时为 1 |
-| 启动 OOM | 权重 + KV + 图内存超过 64GB/chip | 降 `--max-model-len` / `--max-num-seqs` / `--max-num-batched-tokens`，或去掉 `--compilation-config`、换 GLM-5.1-w4a8 |
+| `Loading safetensors checkpoint shards: 0%` 长时间不动 | 391GB 权重从 NFS 加载，首次没有 page cache | 通常是正常的，等；用 `cat /proc/<pid>/io` 看 `read_bytes` 是否增长，NFS 0.3~1GB/s 需要 7~20 分钟 |
+| 权重已上卡但日志停在编译/图捕获 | `FULL_AND_PIECEWISE` 图捕获在 391GB 权重 + TP8 下很慢或 OOM | 加 `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`，或 `--enforce-eager`；E2E 用 TP16 |
+| 加载完初始化 KV 时 OOM | TP8 下每 chip 权重约 49GB，只剩约 8GB 给 KV/激活 | 改用 `-tp 16`（每 chip 约 24.5GB） |
+| 启动 OOM | 权重 + KV + 图内存超过 64GB/chip | 降 `--max-model-len` / `--max-num-seqs` / `--max-num-batched-tokens`，或去掉 `--compilation-config`、换 TP16 |
 | 命中率远低于 90% | host pool 太小导致 block 被换出 | 提高 `dram_size_per_dp_GB`（host 内存允许时）或降低并发 |
 | 图模式启动失败 | 该路径图捕获有问题 | 加 `--enforce-eager` 先跑通（A/B 两端保持一致即可） |
 
@@ -723,7 +726,7 @@ PY
 
 | 权重 | `du -sh` 实测 | 每 chip 权重 | 剩给 KV/激活 | 结论 |
 |---|---|---|---|---|
-| `GLM-5.1-w4a8` | 约 200GB | 约 12.5GB | 约 45GB | ✅ 最稳，首选 |
+| `GLM-5.1-w4a8` | 391GB（实测） | 约 24.5GB | 约 33GB | ✅ 最稳，首选 |
 | `GLM-5.2-w4a8` | 755GB | 约 47GB | 约 10GB | ⚠️ 32K 可试，可能 OOM |
 | `GLM-5.2-w8a8` | 需实测（文档下限 1TB） | 可能 > 50GB | 很小 | ⚠️ 不推荐 |
 
@@ -738,7 +741,7 @@ PY
 同时必须**缩小测试场景**，不能照搬同事的 128K / 16 卡命令。原因：
 
 - 用 `keep_device_kv_cache=true` 时，device 上仍保留完整 paged KV，且 MLA 的 KV 在 TP rank 之间是**复制**的，每张卡都要放一份；
-- 每个 64GB chip 要同时装下：权重（GLM-5.1-w4a8 约 12.5GB/chip；GLM-5.2-w4a8 约 47GB/chip）+ KV（每 chip 一份）+ 激活 / 图内存（约 10GB）。
+- 每个 64GB chip 要同时装下：权重（GLM-5.1-w4a8 约 24.5GB/chip；GLM-5.2-w4a8 约 47GB/chip）+ KV（每 chip 一份）+ 激活 / 图内存（约 10GB）。
 
 显存预算参考（按 MLA 每 token 约 70~90KB 估算；GLM-5.2 层数可能与 5.1 不同，以实测 `npu-smi info` 为准）：
 
@@ -765,7 +768,7 @@ PY
 | `GLM-5.2-w8a8` | W8A8 权重，主 KV 由 `--kv-cache-dtype` 决定（默认 BF16） | ⚠️ 文档下限 1TB；本机刚好达到，余量取决于实际体积，不推荐 |
 | `GLM-5.2-w4a8` | W4A8 权重，主 KV 默认 BF16；**实测约 755GB** | ⚠️ TP16 下约 47GB/chip，32K 可试，余量小 |
 | `GLM-5.2-w4a8c8` | W4A8 权重 + **C8 主 KV cache** | ❌ C8 与 sparse offload 互斥 |
-| `GLM-5.1-w4a8` | W4A8 权重，主 KV 默认 BF16 | ✅ 最稳（官方 64GB × 8 配置） |
+| `GLM-5.1-w4a8` | W4A8 权重，主 KV 默认 BF16；**实测 391GB** | ✅ 最稳（官方 64GB × 8 配置） |
 
 名字里的 `c8` 指的是 **KV cache 量化**，不是权重。C8 模型的 checkpoint 里带 `kv_cache_scale`，运行时需要 `--kv-cache-dtype int8`；而一旦 cache dtype 是 int8/fp8：
 
@@ -904,7 +907,7 @@ cmake --install "$EXT_BUILD_DIR"
 
 本机 16 个逻辑 NPU 正好可以切成 **P TP8（chip 0-7）+ D TP8（chip 8-15）**。前提是**每个实例都要加载完整权重**：
 
-- `GLM-5.1-w4a8`（约 200GB）→ 每侧 8 × 64GB = 512GB，放得下 ✅
+- `GLM-5.1-w4a8`（实测 391GB）→ 每侧 8 × 64GB = 512GB，每 chip 约 49GB 权重，余量约 15GB/chip，偏紧 ⚠️
 - `GLM-5.2-w4a8`（755GB）→ 每侧 512GB 放不下 ❌（这种情况只能用 TP16 colocate）
 
 PD 需要额外的 memfabric 配置和代理进程；如果只是做算子 A/B，优先用第 6 节的 colocate 调试模式。
