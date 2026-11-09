@@ -130,7 +130,7 @@ git status --porcelain -- csrc/attention/fused_sparse_attention_overlap
 
 export SOC_VERSION=ascend910_9382
 export MAX_JOBS=8
-source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 export LD_LIBRARY_PATH="$ASCEND_HOME_PATH/$(uname -m)-linux/devlib:${LD_LIBRARY_PATH:-}"
 
 export AB=/home/z00943842/fsao_ab
@@ -224,6 +224,7 @@ export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 export DRAM_GB=${DRAM_GB:-48}
 
 export ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}
+export CANN_SET_ENV=${CANN_SET_ENV:-/usr/local/Ascend/ascend-toolkit/latest/set_env.sh}
 export SOC_VERSION=${SOC_VERSION:-ascend910_9382}
 export MAX_JOBS=${MAX_JOBS:-8}
 
@@ -257,8 +258,9 @@ source "$HERE/env.sh"
 PKG="$REPO/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"
 [ -d "$PKG" ] || { echo "missing custom op package: $PKG" >&2; exit 1; }
 
-if [ -f "$ASCEND_HOME_PATH/bin/setenv.bash" ]; then
-  source "$ASCEND_HOME_PATH/bin/setenv.bash"
+CANN_SET_ENV=${CANN_SET_ENV:-/usr/local/Ascend/ascend-toolkit/latest/set_env.sh}
+if [ -f "$CANN_SET_ENV" ]; then
+  source "$CANN_SET_ENV"
 fi
 
 # 显式指向当前主树里的包，避免 set_env.bash 里写死的旧绝对路径
@@ -894,7 +896,7 @@ git rev-parse pr20927 # 期望 653d08d...
 # 2. base 包
 git checkout "$base"
 export SOC_VERSION=ascend910_9382 MAX_JOBS=8
-source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee /home/z00943842/fsao_ab/build_base.log
 cp -a vllm_ascend/_cann_ops_custom /home/z00943842/fsao_ab/ops/base
 
