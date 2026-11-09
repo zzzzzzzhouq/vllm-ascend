@@ -142,9 +142,14 @@ bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee "$AB/build_base.log"
 rm -rf "$AB/ops/base"
 cp -a vllm_ascend/_cann_ops_custom "$AB/ops/base"
 
-# 约定：$AB/ops/base 本身就是 _cann_ops_custom 的内容
-test -d "$AB/ops/base/vendors/custom_transformer" && echo "base: vendors ok"
-test ! -d "$AB/ops/base/_cann_ops_custom" && echo "base: not nested"
+# 推荐布局是 base/vendors/...；嵌套布局脚本也能处理
+if [ -d "$AB/ops/base/vendors/custom_transformer" ]; then
+  echo "base: canonical layout"
+elif [ -d "$AB/ops/base/_cann_ops_custom/vendors/custom_transformer" ]; then
+  echo "base: nested layout (still accepted)"
+else
+  echo "ERROR: base package root not found"
+fi
 ```
 
 如果 `catlass` 子模块缺失，`build_aclnn.sh` 会自动 fetch；失败时手动拷：
@@ -156,9 +161,9 @@ cp -a /home/z00943842/base/vllm-ascend/csrc/third_party/catlass csrc/third_party
 验收：
 
 ```bash
-# 正确结构：base/vendors/...
-# 如果看到 base/_cann_ops_custom/vendors，说明 cp 嵌套了，见第 10 节
-ls "$AB/ops/base/vendors/custom_transformer/"
+# 推荐 base/vendors/...；脚本也兼容 base/_cann_ops_custom/vendors/...
+ls "$AB/ops/base/vendors/custom_transformer/" 2>/dev/null || \
+  ls "$AB/ops/base/_cann_ops_custom/vendors/custom_transformer/"
 find "$AB/ops/base" -type f | wc -l
 ```
 
@@ -177,8 +182,13 @@ bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee "$AB/build_opt.log"
 rm -rf "$AB/ops/opt"
 cp -a vllm_ascend/_cann_ops_custom "$AB/ops/opt"
 
-test -d "$AB/ops/opt/vendors/custom_transformer" && echo "opt: vendors ok"
-test ! -d "$AB/ops/opt/_cann_ops_custom" && echo "opt: not nested"
+if [ -d "$AB/ops/opt/vendors/custom_transformer" ]; then
+  echo "opt: canonical layout"
+elif [ -d "$AB/ops/opt/_cann_ops_custom/vendors/custom_transformer" ]; then
+  echo "opt: nested layout (still accepted)"
+else
+  echo "ERROR: opt package root not found"
+fi
 ```
 
 编译完成后 **让仓库停在 `653d08d`**，后续 Python 运行时都用这棵树。
@@ -359,20 +369,39 @@ EOF
 ```bash
 cat > swap_ops.sh <<'EOF'
 #!/usr/bin/env bash
-# 切换完整算子包。用法: ./swap_ops.sh base|opt
+# 切换完整算子包。
+# 用法: ./swap_ops.sh base|opt
+#
+# 兼容两种保存布局：
+#   $AB/ops/base/vendors/custom_transformer/...                  （推荐）
+#   $AB/ops/base/_cann_ops_custom/vendors/custom_transformer/... （cp 嵌套）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/env.sh"
 
+resolve_pkg_root() {
+  local d="$1"
+  if [ -d "$d/vendors/custom_transformer" ]; then
+    printf '%s\n' "$d"
+  elif [ -d "$d/_cann_ops_custom/vendors/custom_transformer" ]; then
+    printf '%s\n' "$d/_cann_ops_custom"
+  else
+    return 1
+  fi
+}
+
 build="${1:?usage: swap_ops.sh base|opt}"
 src="$AB/ops/$build"
 [ -d "$src" ] || { echo "missing package: $src" >&2; exit 1; }
 
-# 约定：$src 本身就是 _cann_ops_custom 的内容
-if [ -d "$src/_cann_ops_custom" ] || [ ! -d "$src/vendors/custom_transformer" ]; then
-  echo "ERROR: $src 不是算子包根目录（可能 cp 嵌套了）" >&2
+if ! src_root=$(resolve_pkg_root "$src"); then
+  echo "ERROR: $src 下找不到 vendors/custom_transformer" >&2
+  echo "       也不是 _cann_ops_custom/vendors/custom_transformer" >&2
   exit 1
+fi
+if [ "$src_root" != "$src" ]; then
+  echo "WARN: $src 使用嵌套布局，实际包根为 $src_root"
 fi
 
 pkill -9 -f "vllm serve" || true
@@ -380,9 +409,9 @@ pkill -9 -f EngineCore || true
 sleep 10
 
 rm -rf "$REPO/vllm_ascend/_cann_ops_custom"
-cp -a "$src" "$REPO/vllm_ascend/_cann_ops_custom"
+cp -a "$src_root" "$REPO/vllm_ascend/_cann_ops_custom"
 
-diff -rq "$REPO/vllm_ascend/_cann_ops_custom" "$src" >/dev/null \
+diff -rq "$REPO/vllm_ascend/_cann_ops_custom" "$src_root" >/dev/null \
   && echo "ACTIVE=$build"
 
 fp="$RESULTS/pkg_${build}_$(date +%H%M%S).md5"
@@ -646,27 +675,52 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/env.sh"
 
+resolve_pkg_root() {
+  local d="$1"
+  if [ -d "$d/vendors/custom_transformer" ]; then
+    printf '%s\n' "$d"
+  elif [ -d "$d/_cann_ops_custom/vendors/custom_transformer" ]; then
+    printf '%s\n' "$d/_cann_ops_custom"
+  else
+    return 1
+  fi
+}
+
 for p in "$OPS_BASE" "$OPS_OPT"; do
   [ -d "$p" ] || { echo "missing $p" >&2; exit 1; }
-  # 约定：$p 本身就是 _cann_ops_custom 的内容
-  if [ -d "$p/_cann_ops_custom" ] || [ ! -d "$p/vendors/custom_transformer" ]; then
-    echo "ERROR: $p 不是算子包根目录（可能 cp 嵌套了，见手册第 10 节）" >&2
-    exit 1
-  fi
 done
 
+if ! ROOT_BASE=$(resolve_pkg_root "$OPS_BASE"); then
+  echo "ERROR: $OPS_BASE 不是算子包根目录" >&2
+  exit 1
+fi
+if ! ROOT_OPT=$(resolve_pkg_root "$OPS_OPT"); then
+  echo "ERROR: $OPS_OPT 不是算子包根目录" >&2
+  exit 1
+fi
+
+if [ "$ROOT_BASE" != "$OPS_BASE" ]; then
+  echo "note: base 使用嵌套布局 $ROOT_BASE"
+fi
+if [ "$ROOT_OPT" != "$OPS_OPT" ]; then
+  echo "note: opt  使用嵌套布局 $ROOT_OPT"
+fi
+echo "base root: $ROOT_BASE"
+echo "opt root:  $ROOT_OPT"
+
+echo
 echo "== file counts =="
-find "$OPS_BASE" -type f | wc -l
-find "$OPS_OPT" -type f | wc -l
+find "$ROOT_BASE" -type f | wc -l
+find "$ROOT_OPT" -type f | wc -l
 
 echo
 echo "== diff base vs opt =="
-diff -rq "$OPS_BASE" "$OPS_OPT" | tee "$AB/pkgs.diff" || true
+diff -rq "$ROOT_BASE" "$ROOT_OPT" | tee "$AB/pkgs.diff" || true
 echo "diff entries: $(wc -l < "$AB/pkgs.diff")"
 
 echo
 echo "== fused_sparse_attention_overlap fingerprints (must differ) =="
-for p in "$OPS_BASE" "$OPS_OPT"; do
+for p in "$ROOT_BASE" "$ROOT_OPT"; do
   echo "== $p"
   find "$p" -type f -path '*fused_sparse_attention_overlap*' -print0 \
     | sort -z | xargs -0 md5sum
@@ -725,10 +779,11 @@ echo "$MODEL_PATH"
 echo "$AISV_DIR $AISBENCH_TOOL"
 ls "$AISV_DIR/bin/activate"
 ls "$AISBENCH_TOOL/aisbench_test.py"
-# 正确结构：ops/base/vendors/...（base 本身就是 _cann_ops_custom 的内容）
-ls "$AB/ops/base/vendors/custom_transformer/"
-ls "$AB/ops/opt/vendors/custom_transformer/"
-# 如果这两个目录不存在、但存在 _cann_ops_custom 子目录，说明 copy 嵌套了
+# 推荐 ops/base/vendors/...；脚本也兼容 ops/base/_cann_ops_custom/vendors/...
+ls "$AB/ops/base/vendors/custom_transformer/" 2>/dev/null || \
+  ls "$AB/ops/base/_cann_ops_custom/vendors/custom_transformer/"
+ls "$AB/ops/opt/vendors/custom_transformer/" 2>/dev/null || \
+  ls "$AB/ops/opt/_cann_ops_custom/vendors/custom_transformer/"
 ```
 
 ---
@@ -888,12 +943,19 @@ $AISV_DIR/bin/python summary.py
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删掉该参数 |
 | 下一轮启动时显存没释放 | 旧进程残留 | 增大 `swap_ops.sh` 的 `sleep`；`npu-smi info` 确认 |
 | `bad interpreter: ...^M` | 脚本被写成 CRLF | `sed -i 's/\r$//' *.sh summary.py` |
-| 看到 `$AB/ops/base/_cann_ops_custom/vendors/...` | `cp -a` 时目标目录已存在，嵌套了一层 | 按下方“修复嵌套”处理 |
+| 看到 `$AB/ops/base/_cann_ops_custom/vendors/...` | `cp -a` 时目标目录已存在，嵌套了一层 | 可选：按下方“修复嵌套”拍平；`swap_ops.sh` / `check_pkgs.sh` 也能自动识别 |
 | `undefined symbol ... libgraph_base.so`（安装校验） | CANN 环境不对/混用 | 新终端 `source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh`，确认 `ASCEND_HOME_PATH`；不要 `--force` |
 
-### 修复嵌套
+### 修复嵌套（可选）
 
-如果 `$AB/ops/base` 或 `$AB/ops/opt` 下面多了一层 `_cann_ops_custom`：
+`swap_ops.sh` 和 `check_pkgs.sh` 会自动识别下面两种布局：
+
+```text
+$AB/ops/base/vendors/custom_transformer/...                  （推荐）
+$AB/ops/base/_cann_ops_custom/vendors/custom_transformer/... （cp 嵌套）
+```
+
+所以嵌套不是必须修的。想拍平就执行：
 
 ```bash
 for b in base opt; do
@@ -904,13 +966,13 @@ for b in base opt; do
   fi
 done
 
-# 验证：应直接看到 vendors/custom_transformer
+# 验证
 ls "$AB/ops/base/vendors/custom_transformer/"
 ls "$AB/ops/opt/vendors/custom_transformer/"
 ```
 
-约定：`$AB/ops/base` 和 `$AB/ops/opt` **本身就是 `_cann_ops_custom` 的内容**，
-所以正确路径是 `base/vendors/...`，不是 `base/_cann_ops_custom/vendors/...`。
+推荐布局是 `base/vendors/...`，因为这样 `$AB/ops/base` 本身就等于安装目录
+`$REPO/vllm_ascend/_cann_ops_custom` 的内容，最不容易混。
 
 ---
 
