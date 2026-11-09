@@ -139,7 +139,12 @@ mkdir -p "$AB/ops" "$AB/results"
 # 首次全量构建约 30 分钟以上，建议 tmux / nohup
 bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee "$AB/build_base.log"
 
+rm -rf "$AB/ops/base"
 cp -a vllm_ascend/_cann_ops_custom "$AB/ops/base"
+
+# 约定：$AB/ops/base 本身就是 _cann_ops_custom 的内容
+test -d "$AB/ops/base/vendors/custom_transformer" && echo "base: vendors ok"
+test ! -d "$AB/ops/base/_cann_ops_custom" && echo "base: not nested"
 ```
 
 如果 `catlass` 子模块缺失，`build_aclnn.sh` 会自动 fetch；失败时手动拷：
@@ -151,6 +156,8 @@ cp -a /home/z00943842/base/vllm-ascend/csrc/third_party/catlass csrc/third_party
 验收：
 
 ```bash
+# 正确结构：base/vendors/...
+# 如果看到 base/_cann_ops_custom/vendors，说明 cp 嵌套了，见第 10 节
 ls "$AB/ops/base/vendors/custom_transformer/"
 find "$AB/ops/base" -type f | wc -l
 ```
@@ -167,7 +174,11 @@ git log --oneline -1
 
 bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee "$AB/build_opt.log"
 
+rm -rf "$AB/ops/opt"
 cp -a vllm_ascend/_cann_ops_custom "$AB/ops/opt"
+
+test -d "$AB/ops/opt/vendors/custom_transformer" && echo "opt: vendors ok"
+test ! -d "$AB/ops/opt/_cann_ops_custom" && echo "opt: not nested"
 ```
 
 编译完成后 **让仓库停在 `653d08d`**，后续 Python 运行时都用这棵树。
@@ -357,6 +368,12 @@ source "$HERE/env.sh"
 build="${1:?usage: swap_ops.sh base|opt}"
 src="$AB/ops/$build"
 [ -d "$src" ] || { echo "missing package: $src" >&2; exit 1; }
+
+# 约定：$src 本身就是 _cann_ops_custom 的内容
+if [ -d "$src/_cann_ops_custom" ] || [ ! -d "$src/vendors/custom_transformer" ]; then
+  echo "ERROR: $src 不是算子包根目录（可能 cp 嵌套了）" >&2
+  exit 1
+fi
 
 pkill -9 -f "vllm serve" || true
 pkill -9 -f EngineCore || true
@@ -631,6 +648,11 @@ source "$HERE/env.sh"
 
 for p in "$OPS_BASE" "$OPS_OPT"; do
   [ -d "$p" ] || { echo "missing $p" >&2; exit 1; }
+  # 约定：$p 本身就是 _cann_ops_custom 的内容
+  if [ -d "$p/_cann_ops_custom" ] || [ ! -d "$p/vendors/custom_transformer" ]; then
+    echo "ERROR: $p 不是算子包根目录（可能 cp 嵌套了，见手册第 10 节）" >&2
+    exit 1
+  fi
 done
 
 echo "== file counts =="
@@ -703,8 +725,10 @@ echo "$MODEL_PATH"
 echo "$AISV_DIR $AISBENCH_TOOL"
 ls "$AISV_DIR/bin/activate"
 ls "$AISBENCH_TOOL/aisbench_test.py"
+# 正确结构：ops/base/vendors/...（base 本身就是 _cann_ops_custom 的内容）
 ls "$AB/ops/base/vendors/custom_transformer/"
 ls "$AB/ops/opt/vendors/custom_transformer/"
+# 如果这两个目录不存在、但存在 _cann_ops_custom 子目录，说明 copy 嵌套了
 ```
 
 ---
@@ -864,6 +888,29 @@ $AISV_DIR/bin/python summary.py
 | `unrecognized arguments: --num-warmups` | aisbench 版本差异 | 按工具 README FAQ 3 删掉该参数 |
 | 下一轮启动时显存没释放 | 旧进程残留 | 增大 `swap_ops.sh` 的 `sleep`；`npu-smi info` 确认 |
 | `bad interpreter: ...^M` | 脚本被写成 CRLF | `sed -i 's/\r$//' *.sh summary.py` |
+| 看到 `$AB/ops/base/_cann_ops_custom/vendors/...` | `cp -a` 时目标目录已存在，嵌套了一层 | 按下方“修复嵌套”处理 |
+| `undefined symbol ... libgraph_base.so`（安装校验） | CANN 环境不对/混用 | 新终端 `source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh`，确认 `ASCEND_HOME_PATH`；不要 `--force` |
+
+### 修复嵌套
+
+如果 `$AB/ops/base` 或 `$AB/ops/opt` 下面多了一层 `_cann_ops_custom`：
+
+```bash
+for b in base opt; do
+  if [ -d "$AB/ops/$b/_cann_ops_custom" ]; then
+    mv "$AB/ops/$b/_cann_ops_custom" "$AB/ops/$b.tmp"
+    rm -rf "$AB/ops/$b"
+    mv "$AB/ops/$b.tmp" "$AB/ops/$b"
+  fi
+done
+
+# 验证：应直接看到 vendors/custom_transformer
+ls "$AB/ops/base/vendors/custom_transformer/"
+ls "$AB/ops/opt/vendors/custom_transformer/"
+```
+
+约定：`$AB/ops/base` 和 `$AB/ops/opt` **本身就是 `_cann_ops_custom` 的内容**，
+所以正确路径是 `base/vendors/...`，不是 `base/_cann_ops_custom/vendors/...`。
 
 ---
 
@@ -898,11 +945,13 @@ git checkout "$base"
 export SOC_VERSION=ascend910_9382 MAX_JOBS=8
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee /home/z00943842/fsao_ab/build_base.log
+rm -rf /home/z00943842/fsao_ab/ops/base
 cp -a vllm_ascend/_cann_ops_custom /home/z00943842/fsao_ab/ops/base
 
 # 3. opt 包
 git checkout pr20927
 bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION" 2>&1 | tee /home/z00943842/fsao_ab/build_opt.log
+rm -rf /home/z00943842/fsao_ab/ops/opt
 cp -a vllm_ascend/_cann_ops_custom /home/z00943842/fsao_ab/ops/opt
 
 # 4. 工具（按第 5 节创建后）
