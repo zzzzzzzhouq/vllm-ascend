@@ -567,10 +567,10 @@ def chapter2(doc: Doc):
         "其他依赖",
         ["依赖", "来源", "用途"],
         [
-            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest 公共 conftest 的导入链需要"],
-            ["modelscope", "随 requirements 安装", "conftest 会 import，测试不下载模型；不要设置 `VLLM_USE_MODELSCOPE`"],
-            ["pytest", "随 requirements 安装", "运行仓内单算子用例"],
-            ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译 Python 扩展与算子包"],
+            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest conftest 需要"],
+            ["modelscope", "单独安装，`<1.38`", "conftest 需要；测试不下载模型"],
+            ["pytest", "单独安装", "运行仓内单算子用例"],
+            ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译扩展与算子包"],
             ["ais-bench-benchmark + pandas", "独立 venv 安装", "整网压测（可选）"],
         ],
         [4.0, 8.6, 4.0],
@@ -707,12 +707,16 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 """,
         "编译环境变量",
     )
-    doc.p("安装编译和测试依赖：")
+    doc.p(
+        "安装编译和测试依赖。不要直接 `pip install -r requirements-dev.txt`：它会连带安装 `requirements.txt` 里的 "
+        "torch / torch-npu / triton-ascend，和镜像里按 CANN 配好的版本不一定一致，容易把环境搞坏。只装下面这几项："
+    )
     doc.code(
         r"""
-python3 -m pip install -r requirements-dev.txt
+python3 -m pip install setuptools-rust ninja pybind11
+python3 -m pip install 'modelscope<1.38' 'pytest>=6,<9'
 """,
-        "安装依赖",
+        "安装编译与测试依赖",
     )
     doc.p("检查点：`ninja --version` 要能正常打印版本号，且 `which ninja` 在当前 Python 环境里。")
     doc.code(
