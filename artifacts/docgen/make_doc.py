@@ -605,7 +605,8 @@ def chapter3(doc: Doc):
 
     doc.p(
         "这一章是从零到算子可用的完整流程，命令按顺序执行即可。尖括号里的内容（如 `<容器名>`、`<本机 IP>`）"
-        "要换成自己的实际值，其余保持原样。每一步末尾都有检查点：看到期望结果再进下一步，没通过就翻附录 B。"
+        "要换成自己的实际值，其余保持原样。没有特别说明的话，命令都在 vllm-ascend 仓库根目录执行。"
+        "每一步末尾都有检查点：看到期望结果再进下一步，没通过就翻附录 B。"
     )
 
     doc.h2("3.1 第 1 步：拉镜像、启动容器")
@@ -679,16 +680,16 @@ export no_proxy=127.0.0.1,localhost,.huawei.com,10.*.*.*
 export GIT_SSL_NO_VERIFY=1
 export CMAKE_TLS_VERIFY=0
 
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
+git clone https://github.com/vllm-project/vllm-ascend.git <仓库目录>
+cd <仓库目录>
 git fetch origin pull/20927/head:pr20927
 git checkout pr20927
 """,
         "配置代理并拉取 PR 代码",
     )
     doc.p(
-        "代码会拉到 `~/vllm-ascend`。后面的命令都在这个目录里执行；换终端时先 `cd ~/vllm-ascend`，"
-        "并重新跑一遍下面的环境变量。"
+        "`<仓库目录>` 自己起，比如 `vllm-ascend`。后面没有特别说明的命令，都在这个仓库根目录执行；"
+        "换终端时先 `cd <仓库目录>`，并重新跑一遍下面的环境变量。"
     )
     doc.p("配置编译环境变量（只对当前终端生效）：")
     doc.code(
@@ -761,7 +762,7 @@ python3 -c "import vllm; print(vllm.__file__)"
     )
     doc.code(
         r"""
-cd ~/vllm-ascend
+cd <仓库根目录>
 rm -rf csrc/build csrc/build_out csrc/output build
 
 COMPILE_CUSTOM_KERNELS=1 python3 -m pip install -e . --no-build-isolation
@@ -781,7 +782,7 @@ Successfully installed ... vllm_ascend-...
     doc.p("加载自定义算子包，确认算子已经注册：")
     doc.code(
         r"""
-cd ~/vllm-ascend
+cd <仓库根目录>
 source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
 
 python3 - <<'PY'
@@ -833,7 +834,7 @@ def chapter4(doc: Doc):
     )
     doc.code(
         r"""
-export MODEL_PATH=/path/to/模型权重
+export MODEL_PATH=<权重目录>
 
 # 查看本机网卡和 IP，第二列是网卡名
 ip -o -4 addr show | awk '$4 !~ /^127/ {print $2, $4}'
@@ -924,7 +925,7 @@ curl -s http://127.0.0.1:8000/metrics | grep prefix_cache | head
     )
     doc.code(
         r"""
-cd ~/vllm-ascend
+cd <仓库根目录>
 source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
 export ASCEND_RT_VISIBLE_DEVICES=0
 
