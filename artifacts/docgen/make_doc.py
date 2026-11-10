@@ -685,7 +685,7 @@ def chapter2(doc: Doc):
     doc.h1("二、环境依赖和约束")
 
     doc.p(
-        "这套组合在 Atlas A3 单机上跑通过。换硬件、换镜像、换 CANN 之后别默认还能跑，先按 2.5 节自检一遍。"
+        "这套组合在 Atlas A3 单机上跑通过。换硬件、换镜像、换 CANN 之后别默认还能跑，先按 2.6 节自检一遍。"
         "最容易出问题的是 vLLM 提交号，以及 CANN 和 torch_npu 的匹配。"
     )
 
@@ -727,12 +727,59 @@ def chapter2(doc: Doc):
         first_col_bold=True,
     )
 
-    doc.h2("2.3 其他依赖库")
+    doc.h2("2.3 拉取镜像并启动容器")
+    doc.p(
+        "本机已有镜像的可以跳过拉取，直接用下面的 docker run 启动；镜像标签以实际发布为准。"
+    )
+    doc.code(
+        """
+export IMAGE=<官方 vllm-ascend A3 镜像>
+docker images | grep vllm-ascend
+docker pull "$IMAGE"
+""",
+        "查看并拉取镜像",
+    )
+    doc.p("启动容器，把 NPU 设备、驱动和代码目录挂进去：")
+    doc.code(
+        """
+docker run --name <容器名> -it -d --net=host --shm-size=500g \\
+  --privileged=true \\
+  -w /home \\
+  --device=/dev/davinci0 --device=/dev/davinci1 \\
+  --device=/dev/davinci2 --device=/dev/davinci3 \\
+  --device=/dev/davinci4 --device=/dev/davinci5 \\
+  --device=/dev/davinci6 --device=/dev/davinci7 \\
+  --device=/dev/davinci_manager \\
+  --device=/dev/hisi_hdc \\
+  --device=/dev/devmm_svm \\
+  --entrypoint=bash \\
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
+  -v /usr/local/dcmi:/usr/local/dcmi \\
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \\
+  -v /usr/local/sbin:/usr/local/sbin \\
+  -v /home:/home \\
+  -v /tmp:/tmp \\
+  -v /data:/data \\
+  -v /mnt/:/mnt/ \\
+  -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \\
+  -v /etc/hccn.conf:/etc/hccn.conf \\
+  -e http_proxy=$http_proxy \\
+  -e https_proxy=$https_proxy \\
+  "$IMAGE"
+""",
+        "启动容器",
+    )
+    doc.p(
+        "容器启动后执行 `docker exec -it <容器名> bash` 进入。先跑 `npu-smi info` 确认能看到设备，"
+        "再看 `python3 --version`；`npu-smi info` 失败就先查宿主机驱动和容器设备挂载，别继续往下走。"
+    )
+
+    doc.h2("2.4 其他依赖库")
     doc.table(
         "其他依赖",
         ["依赖", "来源", "用途"],
         [
-            ["fla_npu", "当前分支要求的 aarch64 wheel（见下方安装命令）", "pytest 公共 conftest 的导入链需要"],
+            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest 公共 conftest 的导入链需要"],
             ["modelscope", "随 requirements 安装", "conftest 会 import，测试不下载模型；不要设置 `VLLM_USE_MODELSCOPE`"],
             ["pytest", "随 requirements 安装", "运行仓内单算子用例"],
             ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译 Python 扩展与算子包"],
@@ -741,18 +788,12 @@ def chapter2(doc: Doc):
         [4.0, 8.6, 4.0],
         first_col_bold=True,
     )
-    doc.p("安装测试依赖（容器内执行）：")
-    doc.code(
-        """
-python3 -m pip install -r requirements-dev.txt
-
-# FLA 包不随 pip 源发布：从 releases 页面下载当前分支要求的 aarch64 wheel 再安装
-python3 -m pip install --no-deps /path/to/flash_linear_attention_npu_a3-*.whl
-""",
-        "安装编译与测试依赖",
+    doc.p(
+        "编译和测试依赖按仓库的 `requirements-dev.txt` 安装。FLA 的 wheel 不随 pip 源发布，"
+        "需要从 releases 页面下载当前分支要求的 aarch64 版本单独安装。"
     )
 
-    doc.h2("2.4 版本不兼容带来的风险")
+    doc.h2("2.5 版本不兼容带来的风险")
     doc.table(
         "常见版本不兼容风险",
         ["风险项", "典型现象", "规避方式"],
@@ -769,7 +810,7 @@ python3 -m pip install --no-deps /path/to/flash_linear_attention_npu_a3-*.whl
         first_col_bold=True,
     )
 
-    doc.h2("2.5 环境自检")
+    doc.h2("2.6 环境自检")
     doc.p("进入容器后先执行以下检查，全部通过再开始编译：")
     doc.code(
         """
@@ -805,7 +846,30 @@ def chapter3(doc: Doc):
     )
 
     doc.h2("3.1 编译环境准备")
-    doc.p("在仓库根目录执行，所有变量只对当前 shell 生效：")
+    doc.p(
+        "先把代码拉下来。代理和 pip 镜像按实际网络环境配，不需要就跳过前几行；"
+        "PR #20927 的代码直接从官方仓库拉取引用，不必 fork："
+    )
+    doc.code(
+        """
+export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+export PIP_TRUSTED_HOST="repo.huaweicloud.com mirrors.huaweicloud.com"
+
+# 走公司代理时按需设置，<工号> 和 <密码> 换成自己的
+export http_proxy=http://<工号>:<密码>@proxy.huawei.com:8080
+export https_proxy=http://<工号>:<密码>@proxy.huawei.com:8080
+export no_proxy=127.0.0.1,localhost,.huawei.com,10.*.*.*
+export GIT_SSL_NO_VERIFY=1
+export CMAKE_TLS_VERIFY=0
+
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+git fetch origin pull/20927/head:pr20927
+git checkout pr20927
+""",
+        "配置代理并拉取 PR 代码",
+    )
+    doc.p("进入仓库根目录后配置编译环境，变量只对当前 shell 生效：")
     doc.code(
         """
 export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
@@ -877,7 +941,30 @@ ninja --version          # 必须正常打印版本号
     )
 
     doc.h2("3.3 编译步骤")
-    doc.h3("3.3.1 全量包（官方包方式，推荐）")
+    doc.h3("3.3.1 安装当前分支配套的 vLLM")
+    doc.p(
+        "镜像里预装的 vLLM 不一定和分支匹配，必须切到仓库指定的提交。这一步只动 "
+        "`/vllm-workspace/vllm`，不会切换或修改当前的 vllm-ascend 分支。"
+    )
+    doc.code(
+        """
+export VLLM_COMMIT="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+export VLLM_SRC=/vllm-workspace/vllm
+
+if [[ ! -d "$VLLM_SRC/.git" ]]; then
+  git clone https://github.com/vllm-project/vllm.git "$VLLM_SRC"
+fi
+
+git -C "$VLLM_SRC" fetch --depth 1 origin "$VLLM_COMMIT"
+git -C "$VLLM_SRC" checkout --detach FETCH_HEAD
+test "$(git -C "$VLLM_SRC" rev-parse HEAD)" = "$VLLM_COMMIT"
+
+VLLM_TARGET_DEVICE=empty python3 -m pip install -e "$VLLM_SRC" --no-build-isolation --no-deps
+""",
+        "安装配套 vLLM",
+    )
+
+    doc.h3("3.3.2 全量包（官方包方式，推荐）")
     doc.code(
         """
 cd /path/to/vllm-ascend
@@ -899,7 +986,7 @@ Successfully installed ... vllm_ascend-...
         "安装成功标志",
     )
 
-    doc.h3("3.3.2 单算子包（仅用于精度验证）")
+    doc.h3("3.3.3 单算子包（仅用于精度验证）")
     doc.code(
         """
 cd csrc
@@ -917,7 +1004,7 @@ csrc/build/cann-ops-transformer*.run --install-path="$PWD/vllm_ascend/_cann_ops_
         "只装单算子包会让服务启动失败（operator not found）。单算子包仅用于 4.4.1 的精度测试。"
     )
 
-    doc.h3("3.3.3 换算子 / 换分支后的重编")
+    doc.h3("3.3.4 换算子 / 换分支后的重编")
     doc.p(
         "`git checkout` 之后必须重新编译算子。`COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，不会重编算子；"
         "增量构建不需要删除 `csrc/build`，保留它、`touch` 改动文件后重跑即可。只有 CMake 配置或算子列表变化时才需要清理。"
@@ -1302,7 +1389,7 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
         "运行期问题排查",
         ["现象", "原因", "处理"],
         [
-            ["`operator not found` / 算子缺失", "只装了单算子包，或没有重新加载环境", "按 3.3.1 安装全量包；新终端 source set_env.bash；重启进程"],
+            ["`operator not found` / 算子缺失", "只装了单算子包，或没有重新加载环境", "按 3.3.2 安装全量包；新终端 source set_env.bash；重启进程"],
             ["`libcust_opapi.so` 加载失败", "环境变量未生效或库路径不对", "source 算子包的 set_env.bash，检查 `ASCEND_CUSTOM_OPP_PATH`"],
             ["`does not support packed SFA main caches (C8 or TQ4)`", "权重为 c8 或设置 kv-cache-dtype", "换非 c8 权重，去掉 `--kv-cache-dtype`"],
             ["`Sparse KV offload don't support compress now`", "权重带 `compress_ratios`", "换标准 DSA 权重（GLM-5.1/5.2）"],
