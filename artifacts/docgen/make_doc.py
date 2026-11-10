@@ -512,13 +512,6 @@ def revision(doc: Doc):
         first_col_bold=True,
     )
 
-    toc_title = doc.d.add_paragraph()
-    toc_title.paragraph_format.space_before = Pt(8)
-    run = toc_title.add_run("目录")
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=14, bold=True, color=NAVY)
-
-    toc_p = doc.d.add_paragraph()
-    add_field(toc_p, 'TOC \\o "1-3" \\h \\z \\u', "（打开文档后右键“更新域”生成目录）")
     doc.page_break()
 
 
@@ -560,25 +553,11 @@ def chapter1(doc: Doc):
     ])
     doc.p(
         "Pooling SFA 用 status / membership 记下哪些 Token 已在 Selection Cache 里，只搬没在的，搬运和注意力计算流水重叠。"
-        "PR #20927 在 arch22（A2/A3）上又补了几处优化，代码在 `.../op_kernel/arch22` 下。生效条件和收益见下表："
-    )
-    doc.table(
-        "PR #20927 在 arch22 上的优化点",
-        ["优化点", "作用", "生效条件"],
-        [
-            ["空闲核 helper", "小 batch 时调度空闲核参与搬运与回写", "batch ≤ 12"],
-            ["配对排序（Opt01）", "将命中/未命中项配对排序，压缩搬运发射", "存在 selection update"],
-            ["回写路径优化（Opt02~04）", "减少状态回写的数据量与指令数", "存在 selection update"],
-            ["UB 直写（Opt05）", "搬运算子直接写 UB，省去中间中转", "命中率 0%~70% 时收益明显"],
-            ["窗口化两阶段 MergeKv", "搬运与注意力计算流水重叠", "所有 decode 调用"],
-            ["按行数划分 subcore（P0）", "行数足够时优先于 helper，充分利用 48 个 subcore", "batch > 24"],
-        ],
-        [3.8, 7.8, 5.0],
-        first_col_bold=True,
+        "PR #20927 在 arch22（A2/A3）上又补了几处优化，代码在 `.../op_kernel/arch22` 下。"
     )
     doc.p(
         "单算子测试里，selection-update 路径耗时降了 19%~42%，拷贝发射开销降了约 33%，"
-        "命中率 0%~70% 区间端到端提升 10%~12%。这是单算子的数，整网能拿到多少要看 4.3 节的配置，别直接外推。",
+        "命中率 0%~70% 区间端到端提升 10%~12%。这是单算子的数，整网能拿到多少要看 4.2.1 节的配置，别直接外推。",
         size=9.8,
         color=GRAY,
     )
@@ -591,59 +570,7 @@ def chapter1(doc: Doc):
         "单算子精度和性能评估：验证 kernel 改动，或做优化前后的对比。",
     ])
 
-    doc.h3("1.1.4 算子在大模型中的位置")
-    doc.p(
-        "在 GLM-5.x 的一层 decode 里，算子在 Indexer 之后、O 投影之前。Indexer 给出 TopK 索引，"
-        "算子据此更新 Selection Cache、算稀疏注意力，结果送进 O 投影，再进下一层。"
-        "Full KV Cache 是 prefill 阶段写好的，decode 只读。"
-    )
-    doc.p(
-        "两套 Cache 各有一张 Block Table。Full KV Cache 的容量随请求序列增长；Selection KV Cache 的容量由 topk 定，"
-        "block_size = 128、topk = 128 时只占 1 个逻辑块，另加 1 个空闲物理块。算子只管在两者之间搬，不负责分配。"
-    )
-    doc.p(
-        "接入时要同时准备这两套分页元数据，还得保证 TopK 里每个 Token 都能通过 Full KV 的 Block Table 找到物理块。"
-        "找不到，Miss 分支就没数据可搬。"
-    )
-    doc.h3("1.1.5 单次调用的执行流程")
-    doc.p(
-        "算子拿 status 和 membership 判断 TopK Token 在不在 Selection Cache 里。不在的，按 Block Table 从 "
-        "Full KV Cache Gather 出来写进去；在的，直接读。搬运计划先做配对排序，再用窗口化两阶段 MergeKv "
-        "跟注意力计算叠着跑。"
-    )
-    doc.p(
-        "以 topk=128 为例：prefill 之后 Selection Cache 还是空的，第一次调用全部未命中，要搬 128 个 Token；"
-        "第二次用同样的索引，全部命中，搬运量为 0，输出和状态都和第一次一样。"
-    )
-
-    doc.h3("1.1.6 计算语义")
-    doc.p("注意力输出按下式计算，K、V 只取 TopK 索引选中的那些 Token：")
-    p = doc.d.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_before = Pt(6)
-    p.paragraph_format.space_after = Pt(8)
-
-    def math(text, italic=True, sup=False):
-        run = p.add_run(text)
-        set_run_font(run, cn=BODY_CN, en="Cambria Math", size=11, color=NAVY)
-        run.font.italic = italic
-        if sup:
-            run.font.superscript = True
-
-    math("Attention(Q, K, V) = softmax(")
-    math("α")
-    math(" · QK")
-    math("T", italic=False, sup=True)
-    math(") · V")
-    doc.p(
-        "其中 α 一般取 1/√(D+Dr)，D 和 Dr 分别是 NoPE 与 RoPE 的维度，取 512 和 64。"
-        "算法上 Q 由 NoPE 与 RoPE 两部分拼接后与 K 做点积，两部分各自对应一套缓存。"
-        "除了输出的注意力结果，算子还会原地更新四个状态量：`selection_k_rope`、`selection_kv_cache`、"
-        "`selection_kv_block_status`、`selection_membership_map`，并给出本次驻留的有效 Token 数"
-        "（`selection_kv_actual_seq`）。"
-    )
-
-    doc.h2("1.2 算子能力范围与不支持能力")
+    doc.h2("1.2 算子能力范围")
     doc.table(
         "算子支持的能力范围",
         ["维度", "支持范围", "说明"],
@@ -661,23 +588,6 @@ def chapter1(doc: Doc):
         [2.4, 6.2, 8.0],
         first_col_bold=True,
     )
-    doc.table(
-        "不支持能力总览",
-        ["不支持项", "表现 / 后果"],
-        [
-            ["BSND 排布的 query", "layoutQuery 只接受 \"TND\"，其它取值报错或结果未定义"],
-            ["非 MLA 结构（MHA/GQA 普通注意力）", "算子按 D=512、Dr=64 的 MLA-absorb 结构实现，不适用"],
-            ["空 Tensor、非连续输入", "算子要求所有输入非空且连续，需在调用前 contiguous()"],
-            ["topkBlockSize > 1", "融合路径仅支持 selection_topk_block_size = 1"],
-            ["C8 / TQ4 packed 主 KV 缓存", "sparse offload 直接拒绝：does not support packed SFA main caches"],
-            ["带 compress_ratios 的权重（DeepSeek-V4 等）", "Sparse KV offload don't support compress now"],
-            ["Context Parallel（enable_dsa_cp）", "Sparse KV offload 要求 TP without context parallelism"],
-            ["Atlas 200I/500 A2、推理系列、训练系列", "算子未在该产品上编译，调用会报算子不存在"],
-            ["Ascend 950（arch35）", "可运行，但 PR #20927 的优化只改 arch22，无对应收益"],
-        ],
-        [6.4, 10.2],
-        first_col_bold=True,
-    )
 
 
 def chapter2(doc: Doc):
@@ -685,7 +595,7 @@ def chapter2(doc: Doc):
     doc.h1("二、环境依赖和约束")
 
     doc.p(
-        "这套组合在 Atlas A3 单机上跑通过。换硬件、换镜像、换 CANN 之后别默认还能跑，先按 2.6 节自检一遍。"
+        "这套组合在 Atlas A3 单机上跑通过。换硬件、换镜像、换 CANN 之后别默认还能跑，先按 2.4 节自检一遍。"
         "最容易出问题的是 vLLM 提交号，以及 CANN 和 torch_npu 的匹配。"
     )
 
@@ -727,7 +637,61 @@ def chapter2(doc: Doc):
         first_col_bold=True,
     )
 
-    doc.h2("2.3 拉取镜像并启动容器")
+    doc.h2("2.3 其他依赖库")
+    doc.table(
+        "其他依赖",
+        ["依赖", "来源", "用途"],
+        [
+            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest 公共 conftest 的导入链需要"],
+            ["modelscope", "随 requirements 安装", "conftest 会 import，测试不下载模型；不要设置 `VLLM_USE_MODELSCOPE`"],
+            ["pytest", "随 requirements 安装", "运行仓内单算子用例"],
+            ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译 Python 扩展与算子包"],
+            ["ais-bench-benchmark + pandas", "独立 venv 安装", "整网压测（可选）"],
+        ],
+        [4.0, 8.6, 4.0],
+        first_col_bold=True,
+    )
+    doc.p(
+        "编译和测试依赖按仓库的 `requirements-dev.txt` 安装。FLA 的 wheel 不随 pip 源发布，"
+        "需要从 releases 页面下载当前分支要求的 aarch64 版本单独安装。"
+    )
+
+    doc.h2("2.4 环境自检")
+    doc.p("进入容器后先执行以下检查，全部通过再开始编译：")
+    doc.code(
+        """
+npu-smi info                       # 必须正常显示设备
+python3 --version                  # 与镜像内置版本一致
+python3 -c "import platform; print(platform.machine())"   # 必须输出 aarch64
+
+python3 - <<'PY'
+import torch, torch_npu, vllm
+print("torch    :", torch.__version__)
+print("torch_npu:", torch_npu.__version__)
+print("vllm     :", vllm.__version__, vllm.__file__)
+print("npu count:", torch.npu.device_count())
+PY
+
+readlink -f /usr/local/Ascend/ascend-toolkit/latest
+""",
+        "硬件与软件环境自检",
+    )
+    doc.p(
+        "先别急着编译。`npu-smi info` 失败先查 NPU 驱动与容器挂载；`platform.machine()` 不是 `aarch64`，"
+        "说明镜像或节点不对；`vllm.__file__` 为 `None`，说明当前目录的 `vllm/` 挡住了安装包。"
+    )
+
+
+def chapter3(doc: Doc):
+    doc.set_chapter(3)
+    doc.h1("三、编译指导")
+    doc.p(
+        "本节列的是官方预编译包（run 包）用的编译参数。集成方一般直接用官方包，不用自己编；"
+        "只有改了 kernel、适配新 SOC，或者官方包没覆盖你用的版本，才需要照本节重编，"
+        "重编时照抄这些参数就行，产物和官方包一致。"
+    )
+
+    doc.h2("3.1 拉取镜像并启动容器")
     doc.p(
         "本机已有 `vllm-ascend:30.0-a3` 的可以跳过拉取，直接用下面的 docker run 启动。"
     )
@@ -774,78 +738,7 @@ docker run --name <容器名> -it -d --net=host --shm-size=500g \\
         "再看 `python3 --version`；`npu-smi info` 失败就先查宿主机驱动和容器设备挂载，别继续往下走。"
     )
 
-    doc.h2("2.4 其他依赖库")
-    doc.table(
-        "其他依赖",
-        ["依赖", "来源", "用途"],
-        [
-            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest 公共 conftest 的导入链需要"],
-            ["modelscope", "随 requirements 安装", "conftest 会 import，测试不下载模型；不要设置 `VLLM_USE_MODELSCOPE`"],
-            ["pytest", "随 requirements 安装", "运行仓内单算子用例"],
-            ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译 Python 扩展与算子包"],
-            ["ais-bench-benchmark + pandas", "独立 venv 安装", "整网压测（可选）"],
-        ],
-        [4.0, 8.6, 4.0],
-        first_col_bold=True,
-    )
-    doc.p(
-        "编译和测试依赖按仓库的 `requirements-dev.txt` 安装。FLA 的 wheel 不随 pip 源发布，"
-        "需要从 releases 页面下载当前分支要求的 aarch64 版本单独安装。"
-    )
-
-    doc.h2("2.5 版本不兼容带来的风险")
-    doc.table(
-        "常见版本不兼容风险",
-        ["风险项", "典型现象", "规避方式"],
-        [
-            ["vLLM 提交与分支不匹配", "`ImportError: cannot import name 'CircularBufferSpec'` 或缺少 `prepare_dcp_local_seq_lens`", "切到 `.github/vllm-main-verified.commit` 指定的提交"],
-            ["vLLM 比分支新", "`No module named 'vllm.v1.core.kv_cache_planning'`", "同样切回指定提交，不要用最新 main"],
-            ["CANN 与 torch_npu 不匹配", "`libruntime_common.so: undefined symbol`", "使用镜像内置组合；新终端重新 source 正确的 setenv"],
-            ["编译期与运行期 CANN 不一致", "`libcust_opmaster_rt2.0.so` 加载失败", "清理 `csrc/build` 等缓存后全量重编，不要用 --force 跳过校验"],
-            ["ninja 指向旧 Python", "报错路径不是当前 Python 的安装目录", "重装 ninja 并调整 PATH，清缓存重编"],
-            ["SOC_VERSION 与芯片不一致", "运行时找不到 kernel 或精度异常", "编译 `--soc=ascend910_93`，运行 `SOC_VERSION=ascend910_9382`"],
-            ["主 KV 为 C8 / fp8", "offload 初始化直接拒绝", "使用非 c8 权重，去掉 `--kv-cache-dtype`"],
-        ],
-        [4.6, 7.4, 4.6],
-        first_col_bold=True,
-    )
-
-    doc.h2("2.6 环境自检")
-    doc.p("进入容器后先执行以下检查，全部通过再开始编译：")
-    doc.code(
-        """
-npu-smi info                       # 必须正常显示设备
-python3 --version                  # 与镜像内置版本一致
-python3 -c "import platform; print(platform.machine())"   # 必须输出 aarch64
-
-python3 - <<'PY'
-import torch, torch_npu, vllm
-print("torch    :", torch.__version__)
-print("torch_npu:", torch_npu.__version__)
-print("vllm     :", vllm.__version__, vllm.__file__)
-print("npu count:", torch.npu.device_count())
-PY
-
-readlink -f /usr/local/Ascend/ascend-toolkit/latest
-""",
-        "硬件与软件环境自检",
-    )
-    doc.p(
-        "先别急着编译。`npu-smi info` 失败先查 NPU 驱动与容器挂载；`platform.machine()` 不是 `aarch64`，"
-        "说明镜像或节点不对；`vllm.__file__` 为 `None`，说明当前目录的 `vllm/` 挡住了安装包。"
-    )
-
-
-def chapter3(doc: Doc):
-    doc.set_chapter(3)
-    doc.h1("三、编译指导")
-    doc.p(
-        "本节列的是官方预编译包（run 包）用的编译参数。集成方一般直接用官方包，不用自己编；"
-        "只有改了 kernel、适配新 SOC，或者官方包没覆盖你用的版本，才需要照本节重编，"
-        "重编时照抄这些参数就行，产物和官方包一致。"
-    )
-
-    doc.h2("3.1 编译环境准备")
+    doc.h2("3.2 编译环境准备")
     doc.p(
         "先把代码拉下来。代理和 pip 镜像按实际网络环境配，不需要就跳过前几行；"
         "PR #20927 的代码直接从官方仓库拉取引用，不必 fork："
@@ -897,7 +790,7 @@ ninja --version          # 必须正常打印版本号
         "检查 ninja 指向",
     )
 
-    doc.h2("3.2 编译参数清单")
+    doc.h2("3.3 编译参数清单")
     doc.p(
         "vllm-ascend 有两种构建入口：`pip install -e .`（同时构建 Python 扩展与全部自定义算子）"
         "与 `csrc/build.sh` / `csrc/build_aclnn.sh`（只构建算子 run 包）。官方预编译包使用全量参数。"
@@ -921,7 +814,7 @@ ninja --version          # 必须正常打印版本号
         first_col_bold=True,
     )
 
-    doc.h3("3.2.1 编译选项（kernel 级）")
+    doc.h3("3.3.1 编译选项（kernel 级）")
     doc.p(
         "本算子在 `op_host/CMakeLists.txt` 中显式设置了以下编译选项，二次编译时不要随意去掉，"
         "否则可能出现同步错误或性能退化："
@@ -940,8 +833,8 @@ ninja --version          # 必须正常打印版本号
         [7.0, 9.6],
     )
 
-    doc.h2("3.3 编译步骤")
-    doc.h3("3.3.1 安装当前分支配套的 vLLM")
+    doc.h2("3.4 编译步骤")
+    doc.h3("3.4.1 安装当前分支配套的 vLLM")
     doc.p(
         "镜像里预装的 vLLM 不一定和分支匹配，必须切到仓库指定的提交。这一步只动 "
         "`/vllm-workspace/vllm`，不会切换或修改当前的 vllm-ascend 分支。"
@@ -964,7 +857,7 @@ VLLM_TARGET_DEVICE=empty python3 -m pip install -e "$VLLM_SRC" --no-build-isolat
         "安装配套 vLLM",
     )
 
-    doc.h3("3.3.2 全量包（官方包方式，推荐）")
+    doc.h3("3.4.2 全量包（官方包方式，推荐）")
     doc.code(
         """
 cd /path/to/vllm-ascend
@@ -986,7 +879,7 @@ Successfully installed ... vllm_ascend-...
         "安装成功标志",
     )
 
-    doc.h3("3.3.3 单算子包（仅用于精度验证）")
+    doc.h3("3.4.3 单算子包（仅用于精度验证）")
     doc.code(
         """
 cd csrc
@@ -1001,16 +894,16 @@ csrc/build/cann-ops-transformer*.run --install-path="$PWD/vllm_ascend/_cann_ops_
     doc.p(
         "单算子包不能启动整网服务。整网模型会调用 `mla_preprocess`、`sparse_flash_attention`、"
         "`moe_gating_top_k`、`grouped_matmul_swiglu_quant`、`dispatch_ffn_combine` 等约 40 个 A3 自定义算子，"
-        "只装单算子包会让服务启动失败（operator not found）。单算子包仅用于 4.4.1 的精度测试。"
+        "只装单算子包会让服务启动失败（operator not found）。单算子包仅用于附录 A 的精度测试。"
     )
 
-    doc.h3("3.3.4 换算子 / 换分支后的重编")
+    doc.h3("3.4.4 换算子 / 换分支后的重编")
     doc.p(
         "`git checkout` 之后必须重新编译算子。`COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，不会重编算子；"
         "增量构建不需要删除 `csrc/build`，保留它、`touch` 改动文件后重跑即可。只有 CMake 配置或算子列表变化时才需要清理。"
     )
 
-    doc.h2("3.4 产物清单")
+    doc.h2("3.5 产物清单")
     doc.table(
         "编译产物与安装位置",
         ["产物", "路径", "说明"],
@@ -1025,7 +918,7 @@ csrc/build/cann-ops-transformer*.run --install-path="$PWD/vllm_ascend/_cann_ops_
         first_col_bold=True,
     )
 
-    doc.h2("3.5 编译结果验收")
+    doc.h2("3.6 编译结果验收")
     doc.code(
         """
 cd /path/to/vllm-ascend
@@ -1042,9 +935,9 @@ PY
 """,
         "确认算子已注册",
     )
-    doc.p("必须输出 `算子加载成功`。随后可运行 4.4.1 的精度用例，期望 `4 passed`。")
+    doc.p("必须输出 `算子加载成功`。随后可运行 附录 A 的精度用例，期望 `4 passed`。")
 
-    doc.h2("3.6 编译失败排查")
+    doc.h2("3.7 编译失败排查")
     doc.table(
         "编译阶段常见失败",
         ["现象", "原因", "处理"],
@@ -1052,7 +945,7 @@ PY
             ["`ModuleNotFoundError: No module named 'setuptools_rust'`", "缺少编译依赖", "`python3 -m pip install setuptools-rust` 后重跑"],
             ["`No module named 'ninja'`，或 ninja 路径指向其它 Python", "ninja 来自其它 Python 环境", "重装 ninja，调整 PATH 后 `hash -r`"],
             ["`libgraph_base.so: undefined symbol`", "复用了其它 CANN 版本留下的 CMake / ninja 缓存", "清理 `csrc/build`、`csrc/build_out`、`csrc/output`、`build` 后全量重编"],
-            ["`build_aclnn.sh` 非零退出", "环境变量、SOC 或依赖不满足", "查看日志第一处 `[ERROR]`，逐项核对 3.1"],
+            ["`build_aclnn.sh` 非零退出", "环境变量、SOC 或依赖不满足", "查看日志第一处 `[ERROR]`，逐项核对 3.2"],
             ["`catlass is missing, try to fetch it` 后失败", "未初始化子模块 / 代理不可用", "`git submodule update --init --recursive` 后重试"],
             ["`ERROR: Failed building wheel for vllm_ascend`", "算子编译失败", "向上翻日志找到第一个 error，而不是只看最后一行"],
         ],
@@ -1072,144 +965,38 @@ def chapter4(doc: Doc):
     doc.set_chapter(4)
     doc.h1("四、接入指导")
 
-    doc.h2("4.1 调用整体流程")
+    doc.h2("4.1 接入模型的约束")
     doc.p(
-        "接入分两步：先用 `enable_custom_op()` 把算子注册进来，再通过 "
-        "`torch.ops._C_ascend.npu_fused_sparse_attention_overlap` 调用。vLLM 整网走的就是这条路径，"
-        "单点调用和整网调用用的是同一个入口。"
+        "只有带 Indexer 的稀疏注意力模型才走这条路径，落地时要同时满足模型结构和 KV 缓存两方面的条件："
     )
-
-    doc.h3("4.1.1 调用时序（以整网 decode 为例）")
-    doc.p("整网接入按下面的顺序走。前两步是框架的事，跟算子无关：")
     doc.bullets([
-        "Prefill 阶段，模型把每层的 K/V 写进 Full KV Cache（PA_BSND 分页布局），同时记下 Block Table 和有效长度。",
-        "Indexer 阶段，每个 decode step 输出 TopK Token 索引，shape 为 (T1, N2, topk)。",
-        "准备 Selection 状态：申请 Selection KV Cache 和 Block Table；首次调用前把 `selection_kv_block_status`、"
-        "`selection_membership_map` 全填 -1。",
-        "调用算子：14 个输入、5 个属性、2 个输出，执行一次。",
-        "原地更新：算子把未命中的 KV 写进 Selection Cache，同时更新 status / membership，输出 attention 和有效数量。",
-        "复用：下一个 step 用同一份 Selection Cache。TopK 命中率高时，搬运量接近 0。",
-        "回收：请求结束或 KV Block 回收时，重置对应的 status / membership 行。",
+        "权重 config 里有 `index_topk`，没有 `compress_ratios`。GLM-5.x 属于这一类；DeepSeek-V4 系列带 CSA2 "
+        "压缩，不走这条路径。",
+        "主 KV 不是 C8 / TQ4 packed 缓存。`w8a8c8`、`w4a8c8` 这类带 c8 的权重会被 sparse offload 直接拒绝。",
+        "部署时开启 `sparse_kv_offload_config`，并设置 `use_fused_overlap=true`。否则走的是普通推理或 "
+        "Copy-SFA 路径，算子不会执行。",
+        "不要开 `enable_dsa_cp`，也不要用 `--kv-cache-dtype int8/fp8`，两者都和 sparse offload 互斥。",
     ])
-
     doc.table(
-        "调用前置条件检查清单",
-        ["检查项", "要求"],
+        "常见权重的接入结论",
+        ["权重", "结论", "说明"],
         [
-            ["算子已加载", "`hasattr(torch.ops._C_ascend, \"npu_fused_sparse_attention_overlap\")` 为 True"],
-            ["环境已加载", "已 source `custom_transformer/bin/set_env.bash`"],
-            ["输入连续", "所有 Tensor `is_contiguous()`，空 Tensor 不允许"],
-            ["dtype 一致", "query、full KV、selection KV 同为 fp16 或同为 bf16"],
-            ["形状约束", "D=512、Dr=64、N1=4、N2=1、block_size=128、topk ≤ 2048"],
-            ["状态已初始化", "status / membership 为 -1；Selection Cache 首次调用前无有效数据"],
-            ["索引合法", "TopK 索引都在对应 batch 的 `fullKvActualSeq` 范围内"],
-            ["容量足够", "Selection Cache 容量 ≥ topk；两张 Block Table 覆盖所有被访问的逻辑块"],
+            ["GLM-5.1-w4a8", "可用", "约 391GB，TP16 下每 chip 约 24.5GB"],
+            ["GLM-5.2-w4a8", "可用，余量小", "约 755GB，TP16 下每 chip 约 47GB"],
+            ["GLM-5.2-w8a8", "可用，余量很小", "权重文档下限 1TB，刚好达到"],
+            ["任何 c8 权重", "不可用", "C8 主 KV 与 sparse offload 互斥"],
+            ["DeepSeek-V4 / V4.1-Flash", "不可用", "带 `compress_ratios`（CSA2），不走 SFA/offload 路径"],
         ],
-        [4.6, 12.0],
-        first_col_bold=True,
-    )
-
-    doc.h2("4.2 参数与张量契约")
-    doc.p(
-        "参数按算子定义（`op_host/fused_sparse_attention_overlap_def.cpp`）列在表 4-2。"
-        "单点调用和整网调用用的都是这一套参数。"
-    )
-    doc.table(
-        "算子输入输出与属性",
-        ["参数", "方向", "shape", "dtype", "初始化", "说明"],
-        [
-            ["query", "输入", "(T1, N1, D)", "fp16/bf16", "—", "仅 NoPE 部分，D=512；不是 576 维"],
-            ["key", "输入", "(F, bs, 1, D)", "同 query", "—", "Full KV Cache 加一个 head 维（unsqueeze(2)）"],
-            ["value", "输入", "同 key", "同 query", "—", "与 key 同一份数据"],
-            ["sparse_indices", "输入", "(T1, N2, topk)", "int32", "—", "TopK Token 索引，不支持空 Tensor"],
-            ["block_table", "输入（可选）", "(B, F_logical)", "int32", "—", "Full KV 逻辑块 → 物理块"],
-            ["actual_seq_lengths_query", "输入（可选）", "(B,)", "int32", "—", "Decode 场景每项为 1"],
-            ["actual_seq_lengths_kv", "输入（可选）", "(B,)", "int32", "—", "Full KV 的有效长度"],
-            ["query_rope", "输入（可选）", "(T1, N1, Dr)", "fp16/bf16", "—", "Dr=64；无 RoPE 时传 nullptr"],
-            ["key_rope", "输入（可选）", "(F, bs, 1, Dr)", "fp16/bf16", "—", "Full K RoPE，加 head 维"],
-            ["selection_k_rope", "输入/输出", "(S, bs, Dr)", "fp16/bf16", "NaN/任意", "原地更新"],
-            ["selection_kv_cache", "输入/输出", "(S, bs, D)", "fp16/bf16", "NaN/任意", "原地更新"],
-            ["selection_kv_block_table", "输入", "(B, S_logical)", "int32", "—", "Selection Cache 逻辑块 → 物理块"],
-            ["selection_kv_block_status", "输入/输出", "(B, N2, stride)", "int32", "-1", "驻留状态，stride = align8(topk+1)"],
-            ["selection_membership_map", "输入/输出", "(B, N2, 16400)", "int16", "-1", "Token→Slot 映射与搬运计划"],
-            ["attention_out", "输出", "(T1, N1, D)", "同 query", "—", "不含 RoPE 维"],
-            ["selection_kv_actual_seq", "输出", "(B,)", "int32", "—", "本次驻留的有效 Token 数"],
-            ["scale_value", "属性", "标量", "float", "1/sqrt(D+Dr)", "缩放系数"],
-            ["sparse_block_size", "属性", "标量", "int64", "1", "融合路径只支持 1"],
-            ["selection_topk_block_size", "属性", "标量", "int64", "1", "仅 torch 包装暴露，用于校验其为 1"],
-            ["layout_query", "属性", "字符串", "string", "\"TND\"", "只支持 TND"],
-            ["layout_kv", "属性", "字符串", "string", "\"PA_BSND\"", "只支持 PA_BSND"],
-            ["sparse_mode", "属性", "标量", "int64", "3", "rightDownCausal"],
-        ],
-        [4.5, 1.9, 3.1, 1.9, 2.0, 3.2],
-        font_size=8.2,
+        [4.2, 4.0, 8.4],
         first_col_bold=True,
     )
     doc.p(
-        "注意：`selection_topk_block_size` 只存在于 torch 包装层，用于强制校验其为 1。",
-        size=9.5,
-        color=GRAY,
+        "权重自检看 `config.json`：有 `index_topk`、没有 `compress_ratios` 才符合要求；"
+        "再看 `quant_model_description.json` 里有没有 c8。"
     )
 
-    doc.h3("4.2.1 状态张量布局")
-    doc.table(
-        "status 与 membership 的布局",
-        ["张量", "布局", "接入方需要做什么"],
-        [
-            ["`selection_kv_block_status`",
-             "每行前 topk 个 int32 记录驻留 Token ID；索引 topk 处记录有效数量；整行按 8 个 int32 对齐（topk=128 时 stride=136）",
-             "按 stride 申请，整行初始化为 -1；不要改写内容"],
-            ["`selection_membership_map`",
-             "行宽 16400：偏移 [0, 16376) 为 Token→Slot 映射；[16384, 16392) 为 8 个控制字段（含 ready / plan 标记）；[16392] 为计划偏移",
-             "按 16400 申请，整行初始化为 -1；仅在外部计划模式下才写入控制字段"],
-        ],
-        [4.2, 8.2, 4.2],
-        first_col_bold=True,
-    )
-    doc.p(
-        "status / membership 的字段含义属于算子内部实现，接入方只负责按对齐要求分配、初始化并保持原样。"
-        "测试代码中出现的 0x5A4D、0x5A50、0x5A45 等标记，不能作为对外接口使用。"
-    )
-
-    doc.h2("4.3 框架内接入（vLLM / PyTorch 自定义算子）")
-    doc.h3("4.3.1 单点调用")
-    doc.code(
-        """
-import math
-import torch
-import torch_npu
-import vllm_ascend
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
-assert hasattr(torch.ops._C_ascend, "npu_fused_sparse_attention_overlap")
-
-out = torch.ops._C_ascend.npu_fused_sparse_attention_overlap(
-    query=query,                                  # (T1, N1, 576)
-    selection_k_rope=selection_k_rope,
-    selection_kv_cache=selection_kv_cache,
-    selection_kv_block_table=selection_kv_block_table,
-    selection_kv_block_status=selection_kv_block_status,
-    selection_membership_map=selection_membership_map,
-    selection_topk_indices=selection_topk_indices,
-    full_k_rope=full_k_rope,
-    full_kv_cache=full_kv_cache,
-    full_kv_block_table=full_kv_block_table,
-    full_kv_actual_seq=full_kv_actual_seq,
-    full_q_actual_seq=full_q_actual_seq,
-    scale_value=1.0 / math.sqrt(576),
-    sparse_block_size=1,
-    selection_topk_block_size=1,
-    layout_query="TND",
-    layout_kv="PA_BSND",
-    sparse_mode=3,
-)
-torch.npu.synchronize()
-""",
-        "torch 自定义算子调用",
-    )
-
-    doc.h3("4.3.2 整网接入配置")
+    doc.h2("4.2 框架内接入（vLLM / PyTorch 自定义算子）")
+    doc.h3("4.2.1 整网接入配置")
     doc.p(
         "整网只有同时满足三个条件，才会走到本算子：模型带 `index_topk`（GLM-5.x）、"
         "开启 `sparse_kv_offload_config.enabled`、且 `use_fused_overlap=true`。"
@@ -1217,6 +1004,22 @@ torch.npu.synchronize()
     )
     doc.code(
         """
+export MODEL_PATH=/path/to/模型权重
+
+# 查看本机网卡和 IP，第二列是网卡名
+ip -o -4 addr show | awk '$4 !~ /^127/ {print $2, $4}'
+
+export HCCL_IF_IP=<本机 IP>
+export HCCL_SOCKET_IFNAME=<网卡名>
+export GLOO_SOCKET_IFNAME=<网卡名>
+export TP_SOCKET_IFNAME=<网卡名>
+export HCCL_BUFFSIZE=512
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+unset HCCL_INTRA_PCIE_ENABLE
+unset HCCL_INTRA_ROCE_ENABLE
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 vllm serve "$MODEL_PATH" \\
   --tensor-parallel-size 16 \\
   --enable-expert-parallel \\
@@ -1253,47 +1056,12 @@ vllm serve "$MODEL_PATH" \\
         first_col_bold=True,
     )
 
-    doc.h2("4.4 结构验证")
+    doc.h2("4.3 结构验证")
     doc.p(
-        "进程不崩，不代表接入成功。结构验证看的是算子确实被调用、输出和状态都符合契约。"
-        "下面分单算子和整网两层给判据。"
+        "进程不崩，不代表接入成功。结构验证看的是算子确实被调用、offload 路径生效、服务可用。"
     )
 
-    doc.h3("4.4.1 单算子精度测试（仓内用例）")
-    doc.code(
-        """
-cd /path/to/vllm-ascend
-source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
-export ASCEND_RT_VISIBLE_DEVICES=0
-
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py
-""",
-        "运行仓内精度用例",
-    )
-    doc.p("通过标准是最后一行输出：")
-    doc.code("4 passed", "单算子测试通过标志")
-    doc.p(
-        "用例包含 BF16 / FP16 与 topk=32 / 128 的 4 个参数化组合，每个组合都会执行两遍："
-    )
-    doc.table(
-        "单算子用例的断言内容",
-        ["阶段", "断言", "判据说明"],
-        [
-            ["首次调用", "输出 shape / dtype / 无 NaN/Inf", "`attention_out` 为 (1, 4, 512)，与参考同 dtype"],
-            ["首次调用", "`torch.testing.assert_close(out, reference, rtol=1e-2, atol=1e-2)`", "与 CPU 参考实现（gather → softmax → matmul）一致"],
-            ["首次调用", "`status[topk] == topk`", "有效驻留数量等于 TopK"],
-            ["首次调用", "驻留 ID 与 TopK 索引排序后完全相等", "未命中项全部被搬入"],
-            ["首次调用", "Selection Cache 每个 Slot 等于 Full KV 按索引 Gather 的结果", "搬运内容逐元素相等（rtol=atol=0）"],
-            ["首次调用", "membership 的 ready / plan 标记合法", "内部计划状态自洽"],
-            ["再次调用", "输出与首次一致", "All-Hit 路径结果不变"],
-            ["再次调用", "status / Selection Cache 与首次结束后逐元素相同", "All-Hit 不产生重复搬运与改写"],
-        ],
-        [2.4, 7.6, 6.2],
-        first_col_bold=True,
-        keep=False,
-    )
-
-    doc.h3("4.4.2 整网结构验证")
+    doc.h3("4.3.1 整网结构验证")
     doc.bullets([
         "先确认算子被调用。`use_fused_overlap=true` 时 decode 走 `_execute_fused_overlap_offload_decode`，"
         "内部通过 `_require_custom_op(\"npu_fused_sparse_attention_overlap\")` 取算子，缺了会直接抛错。"
@@ -1313,7 +1081,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \\
         "整网验收命令",
     )
 
-    doc.h3("4.4.3 验证清单")
+    doc.h3("4.3.2 验证清单")
     doc.table(
         "结构验证清单",
         ["层次", "验证项", "通过标准"],
@@ -1357,6 +1125,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_at
     doc.h2("附录 B  整网最小启动命令")
     doc.code(
         """
+export MODEL_PATH=/path/to/模型权重
 export HCCL_IF_IP=<本机 IP>
 export HCCL_SOCKET_IFNAME=<网卡名>
 export GLOO_SOCKET_IFNAME=<网卡名>
@@ -1389,7 +1158,7 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
         "运行期问题排查",
         ["现象", "原因", "处理"],
         [
-            ["`operator not found` / 算子缺失", "只装了单算子包，或没有重新加载环境", "按 3.3.2 安装全量包；新终端 source set_env.bash；重启进程"],
+            ["`operator not found` / 算子缺失", "只装了单算子包，或没有重新加载环境", "按 3.4.2 安装全量包；新终端 source set_env.bash；重启进程"],
             ["`libcust_opapi.so` 加载失败", "环境变量未生效或库路径不对", "source 算子包的 set_env.bash，检查 `ASCEND_CUSTOM_OPP_PATH`"],
             ["`does not support packed SFA main caches (C8 or TQ4)`", "权重为 c8 或设置 kv-cache-dtype", "换非 c8 权重，去掉 `--kv-cache-dtype`"],
             ["`Sparse KV offload don't support compress now`", "权重带 `compress_ratios`", "换标准 DSA 权重（GLM-5.1/5.2）"],
@@ -1442,8 +1211,6 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
 
 def build():
     doc = Doc()
-    cover(doc)
-    revision(doc)
     chapter1(doc)
     chapter2(doc)
     chapter3(doc)
