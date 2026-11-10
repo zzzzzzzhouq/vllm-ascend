@@ -803,7 +803,7 @@ ninja --version          # 必须正常打印版本号
             ["`SOC_VERSION`（构建）", "`ascend910_9382`", "传给 build_aclnn.sh，决定编译的芯片型号"],
             ["`--soc`（build.sh）", "`ascend910_93`", "SoC 简称，对应芯片 `ascend910_9382`；不要写成全名"],
             ["`--pkg`", "启用", "生成带 kernel bin 的 run 包；不加则为 JIT 包"],
-            ["`--ops`", "缺省（全量）或 `fused_sparse_attention_overlap`", "逗号分隔的算子 snake 名；单算子包仅用于精度验证"],
+            ["`--ops`", "缺省（全量）", "逗号分隔的算子 snake 名，只编指定算子"],
             ["`-j` / `MAX_JOBS`", "`8`", "并行编译任务数"],
             ["`-O` / `--build-type`", "`O2`（Release）", "编译优化级别"],
             ["`USE_NINJA` / `VLLM_ASCEND_USE_NINJA`", "`auto`", "构建器选择，auto 时优先 ninja"],
@@ -879,28 +879,14 @@ Successfully installed ... vllm_ascend-...
         "安装成功标志",
     )
 
-    doc.h3("3.4.3 单算子包（仅用于精度验证）")
-    doc.code(
-        """
-cd csrc
-bash build.sh --pkg --ops=fused_sparse_attention_overlap --soc=ascend910_93 -j8
-cd ..
-
-chmod +x csrc/build/cann-ops-transformer*.run
-csrc/build/cann-ops-transformer*.run --install-path="$PWD/vllm_ascend/_cann_ops_custom"
-""",
-        "只编译并安装 fused_sparse_attention_overlap",
-    )
-    doc.p(
-        "单算子包不能启动整网服务。整网模型会调用 `mla_preprocess`、`sparse_flash_attention`、"
-        "`moe_gating_top_k`、`grouped_matmul_swiglu_quant`、`dispatch_ffn_combine` 等约 40 个 A3 自定义算子，"
-        "只装单算子包会让服务启动失败（operator not found）。单算子包仅用于附录 A 的精度测试。"
-    )
-
-    doc.h3("3.4.4 换算子 / 换分支后的重编")
+    doc.h3("3.4.3 换算子 / 换分支后的重编")
     doc.p(
         "`git checkout` 之后必须重新编译算子。`COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，不会重编算子；"
         "增量构建不需要删除 `csrc/build`，保留它、`touch` 改动文件后重跑即可。只有 CMake 配置或算子列表变化时才需要清理。"
+    )
+    doc.code(
+        'bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"',
+        "增量编译算子（不重装 vllm-ascend）",
     )
 
     doc.h2("3.5 产物清单")
@@ -1158,7 +1144,7 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
         "运行期问题排查",
         ["现象", "原因", "处理"],
         [
-            ["`operator not found` / 算子缺失", "只装了单算子包，或没有重新加载环境", "按 3.4.2 安装全量包；新终端 source set_env.bash；重启进程"],
+            ["`operator not found` / 算子缺失", "算子包没装上，或环境没重新加载", "按 3.4.2 安装全量包；新终端 source set_env.bash；重启进程"],
             ["`libcust_opapi.so` 加载失败", "环境变量未生效或库路径不对", "source 算子包的 set_env.bash，检查 `ASCEND_CUSTOM_OPP_PATH`"],
             ["`does not support packed SFA main caches (C8 or TQ4)`", "权重为 c8 或设置 kv-cache-dtype", "换非 c8 权重，去掉 `--kv-cache-dtype`"],
             ["`Sparse KV offload don't support compress now`", "权重带 `compress_ratios`", "换标准 DSA 权重（GLM-5.1/5.2）"],
