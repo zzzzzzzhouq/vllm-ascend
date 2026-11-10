@@ -490,11 +490,16 @@ def chapter1(doc: Doc):
     )
 
     doc.h3("1.1.3 典型应用场景")
+    doc.p("它解决的是 decode 阶段“KV 太多、只能挑着算”的场景，主要有下面几类：")
     doc.bullets([
-        "GLM-5.x 的 decode：权重 config 里带 `index_topk`，主 KV 不是 C8。",
-        "长序列稀疏注意力：上下文 32K / 64K，真正参与计算的只有 TopK 个 Token（TopK ≤ 2048）。",
-        "配合 Sparse KV Offload：KV 主副本放在 host 侧大内存池，NPU 上只留 TopK 紧凑缓存。",
-        "单算子精度和性能评估：验证 kernel 改动，或做优化前后的对比。",
+        "长上下文稀疏推理。上下文 32K / 64K，全量注意力算不动，Indexer 每个 step 只选 TopK"
+        "（≤ 2048）个 Token；本算子负责把这批 Token 的 KV 备好并算完，DSA/SFA 模型（如 GLM-5.x）都走这条路。",
+        "PD 分离的 decode 节点。prefill 产生的 KV 下放到 host 侧大内存池，decode 节点按 TopK 把要用的 KV 拉回片上，"
+        "Selection Cache 留在 NPU 上跨 step 复用，这是生产部署的典型形态。",
+        "单机调试与功能验证。prefill 和 decode 放在同一台机器上，用 `keep_device_kv_cache` 让 KV 走一遍下放和回搬，"
+        "验证接入是否正常；这种形态的绝对性能不代表生产。",
+        "命中率高的连续 decode。相邻 step 的 TopK 大量重叠，命中率越高，算子省掉的搬运越多，收益越明显。",
+        "kernel 改动后的单算子评估。改完 arch22 的 kernel，直接跑单算子用例和压测，做改动前后的对比。",
     ])
 
     doc.h2("1.2 算子能力范围")
@@ -519,6 +524,7 @@ def chapter1(doc: Doc):
 
 def chapter2(doc: Doc):
     doc.set_chapter(2)
+    doc.page_break()
     doc.h1("二、准备环境")
 
     doc.p(
@@ -601,6 +607,7 @@ PY
 
 def chapter3(doc: Doc):
     doc.set_chapter(3)
+    doc.page_break()
     doc.h1("三、从零跑通（按顺序执行）")
 
     doc.p(
@@ -805,6 +812,7 @@ PY
 
 def chapter4(doc: Doc):
     doc.set_chapter(4)
+    doc.page_break()
     doc.h1("四、启动推理服务")
 
     doc.h2("4.1 能接哪些模型")
@@ -908,6 +916,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 
 def chapter5(doc: Doc):
     doc.set_chapter(5)
+    doc.page_break()
     doc.h1("五、验证算子确实生效")
 
     doc.p("进程不崩、请求能回，不代表走的是这个算子。下面三件事按顺序确认。")
@@ -958,6 +967,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_at
 
 def appendix(doc: Doc):
     doc.set_chapter("A")
+    doc.page_break()
     doc.h1("六、附录")
 
     doc.h2("附录 A  编译参数与产物")
