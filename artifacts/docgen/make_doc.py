@@ -442,79 +442,6 @@ class Doc:
 # --------------------------------------------------------------------------- #
 # content
 # --------------------------------------------------------------------------- #
-def cover(doc: Doc):
-    for _ in range(3):
-        doc.d.add_paragraph()
-
-    p = doc.d.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("FusedSparseAttentionOverlap")
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=30, bold=True, color=NAVY)
-    p.paragraph_format.space_after = Pt(4)
-
-    p = doc.d.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("算子接入指导")
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=30, bold=True, color=NAVY)
-    p.paragraph_format.space_after = Pt(18)
-
-    p = doc.d.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("Atlas A3  ·  vLLM Ascend  ·  PR #20927")
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=13, color=TEAL)
-    p.paragraph_format.space_after = Pt(6)
-
-    line = doc.d.add_paragraph()
-    line.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = line.add_run("—" * 28)
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=10, color=RGBColor(0xC9, 0xD3, 0xE0))
-
-    for _ in range(6):
-        doc.d.add_paragraph()
-
-    info = [
-        ("文档版本", "V1.0"),
-        ("发布日期", "2026-11-09"),
-        ("适用产品", "Atlas A3（ascend910_9382 / SOC ascend910_93）"),
-        ("适用算子", "fused_sparse_attention_overlap（PR #20927）"),
-        ("文档密级", "内部公开"),
-    ]
-    table = doc.d.add_table(rows=0, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = False
-    for k, v in info:
-        row = table.add_row()
-        c0, c1 = row.cells
-        c0.width = Cm(3.6)
-        c1.width = Cm(8.4)
-        p0 = c0.paragraphs[0]
-        p0.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        r0 = p0.add_run(k)
-        set_run_font(r0, cn=HEAD_CN, en=HEAD_CN, size=10, color=GRAY)
-        p1 = c1.paragraphs[0]
-        r1 = p1.add_run("  " + v)
-        set_run_font(r1, size=10, color=DARK)
-
-    doc.page_break()
-
-
-def revision(doc: Doc):
-    p = doc.d.add_paragraph()
-    p.paragraph_format.space_before = Pt(6)
-    p.paragraph_format.space_after = Pt(6)
-    run = p.add_run("修订记录")
-    set_run_font(run, cn=HEAD_CN, en=HEAD_CN, size=13.5, bold=True, color=NAVY)
-    doc.table(
-        "",
-        ["版本", "日期", "修订内容", "修订人"],
-        [["V1.0", "2026-11-09", "首版。覆盖算子概述、环境依赖、编译参数、框架内接入、结构验证。", "—"]],
-        [2.0, 3.0, 9.5, 2.3],
-        first_col_bold=True,
-    )
-
-    doc.page_break()
-
-
 def chapter1(doc: Doc):
     doc.set_chapter(1)
     doc.h1("一、概述")
@@ -522,10 +449,10 @@ def chapter1(doc: Doc):
     doc.h2("1.1 算子简介")
     doc.h3("1.1.1 算子定位")
     doc.p(
-        "FusedSparseAttentionOverlap（下文简称 Pooling SFA）是 DSA（DeepSeek Sparse Attention）稀疏注意力方案里的核心算子。"
-        "DSA 在 decode 时只对 Indexer 选出的 TopK 个历史 Token 算注意力；这些 Token 的 KV 往往不在片上，"
-        "需要按索引搬进 NPU 侧的 Selection KV Cache。Pooling SFA 把这两件事合成一次调用：搬和算在同一个 kernel 里"
-        "重叠执行，KV offload 的搬运也一并融了进来。"
+        "FusedSparseAttentionOverlap（下文简称 Pooling SFA）是 DSA（DeepSeek Sparse Attention）"
+        "稀疏注意力方案里的核心算子。DSA 在 decode 时只对 Indexer 选出的 TopK 个历史 Token 算注意力；"
+        "这些 Token 的 KV 往往不在片上，需要按索引搬进 NPU 侧的 Selection KV Cache。"
+        "Pooling SFA 把这两件事合成一次调用：搬和算在同一个 kernel 里重叠执行，KV offload 的搬运也一并融了进来。"
     )
     doc.p(
         "命中项直接从 Selection KV Cache 读，不再重复搬；未命中项边搬边算。"
@@ -534,8 +461,8 @@ def chapter1(doc: Doc):
 
     doc.h3("1.1.2 解决什么问题")
     doc.p(
-        "长上下文推理里，decode 每个 step 都要读历史 KV，全量注意力的开销随序列长度线性涨。DSA 的思路是"
-        "先用 Indexer 给每个 query 选 TopK 个 Token，只算这些，计算量从 O(L) 降到 O(topk)。"
+        "长上下文推理里，decode 每个 step 都要读历史 KV，全量注意力的开销随序列长度线性涨。"
+        "DSA 的思路是先用 Indexer 给每个 query 选 TopK 个 Token，只算这些，计算量从 O(L) 降到 O(topk)。"
         "GLM-5.x 这类带 `index_topk` 的模型用的是同一思路（SFA）。"
     )
     doc.p(
@@ -552,12 +479,12 @@ def chapter1(doc: Doc):
         "小 batch 时核用不满。请求数少、行数不够，大量 subcore 闲着。",
     ])
     doc.p(
-        "Pooling SFA 用 status / membership 记下哪些 Token 已在 Selection Cache 里，只搬没在的，搬运和注意力计算流水重叠。"
-        "PR #20927 在 arch22（A2/A3）上又补了几处优化，代码在 `.../op_kernel/arch22` 下。"
+        "Pooling SFA 用 status / membership 记下哪些 Token 已在 Selection Cache 里，只搬没在的，"
+        "搬运和注意力计算流水重叠。PR #20927 在 arch22（A2/A3）上又补了几处优化，代码在 `.../op_kernel/arch22` 下。"
     )
     doc.p(
         "单算子测试里，selection-update 路径耗时降了 19%~42%，拷贝发射开销降了约 33%，"
-        "命中率 0%~70% 区间端到端提升 10%~12%。这是单算子的数，整网能拿到多少要看 4.2.1 节的配置，别直接外推。",
+        "命中率 0%~70% 区间端到端提升 10%~12%。这是单算子的数，整网能拿到多少要看 4.2 节的配置，别直接外推。",
         size=9.8,
         color=GRAY,
     )
@@ -592,14 +519,13 @@ def chapter1(doc: Doc):
 
 def chapter2(doc: Doc):
     doc.set_chapter(2)
-    doc.h1("二、环境依赖和约束")
+    doc.h1("二、准备环境")
 
     doc.p(
-        "这套组合在 Atlas A3 单机上跑通过。换硬件、换镜像、换 CANN 之后别默认还能跑，先按 2.4 节自检一遍。"
-        "最容易出问题的是 vLLM 提交号，以及 CANN 和 torch_npu 的匹配。"
+        "下面的配置在 Atlas A3 单机上跑通过。开工前先确认硬件和镜像版本，自检不过就先别往下走。"
     )
 
-    doc.h2("2.1 硬件依赖")
+    doc.h2("2.1 硬件要求")
     doc.table(
         "硬件要求",
         ["项目", "要求 / 取值", "说明"],
@@ -608,17 +534,16 @@ def chapter2(doc: Doc):
             ["CPU 架构", "aarch64（ARM64）", "与镜像内 aarch64 wheel 一致"],
             ["芯片型号", "`ascend910_9382`（SOC `ascend910_93`）", "编译与运行期 SOC 必须对应"],
             ["达芬奇架构", "DAV_2201，代码路径 `op_kernel/arch22`", "PR #20927 的优化仅对 arch22 生效"],
-            ["单算子测试卡数", "1 张（`ASCEND_RT_VISIBLE_DEVICES=0`）", "仓内精度用例单卡即可"],
             ["整网测试卡数", "8 卡 × 2 chip = 16 个逻辑 NPU，每 chip 64GB", "TP16 + EP16；合计 1TB HBM"],
             ["Host 内存", "≥ 512GB（建议 1TB）", "承载权重 page cache 与 sparse offload host pool"],
-            ["共享内存 / 磁盘", "`/dev/shm` ≥ 1GB（建议 8~16GB）；构建磁盘 ≥ 100GB", "全量算子构建与权重加载需要"],
+            ["共享内存 / 磁盘", "`/dev/shm` ≥ 1GB；构建磁盘 ≥ 100GB", "全量算子构建与权重加载需要"],
             ["NPU 驱动", "宿主机安装，容器挂载 `/usr/local/Ascend/driver`", "`npu-smi info` 正常显示设备即合格"],
         ],
         [3.0, 7.0, 6.6],
         first_col_bold=True,
     )
 
-    doc.h2("2.2 软件依赖")
+    doc.h2("2.2 软件要求")
     doc.table(
         "软件要求",
         ["组件", "要求 / 取值", "说明"],
@@ -637,7 +562,7 @@ def chapter2(doc: Doc):
         first_col_bold=True,
     )
 
-    doc.h2("2.3 其他依赖库")
+    doc.h2("2.3 其他依赖")
     doc.table(
         "其他依赖",
         ["依赖", "来源", "用途"],
@@ -651,15 +576,13 @@ def chapter2(doc: Doc):
         [4.0, 8.6, 4.0],
         first_col_bold=True,
     )
-    doc.p(
-        "编译和测试依赖按仓库的 `requirements-dev.txt` 安装。FLA 的 wheel 不随 pip 源发布，"
-        "需要从 releases 页面下载当前分支要求的 aarch64 版本单独安装。"
-    )
 
-    doc.h2("2.4 环境自检")
-    doc.p("进入容器后先执行以下检查，全部通过再开始编译：")
+    doc.h2("2.4 开工前自检")
+    doc.p(
+        "进容器后先跑下面几条，四条都符合再开始。任何一条不对，先看附录 B.1，不要硬着头皮编译。"
+    )
     doc.code(
-        """
+        r"""
 npu-smi info                       # 必须正常显示设备
 python3 --version                  # 与镜像内置版本一致
 python3 -c "import platform; print(platform.machine())"   # 必须输出 aarch64
@@ -671,80 +594,81 @@ print("torch_npu:", torch_npu.__version__)
 print("vllm     :", vllm.__version__, vllm.__file__)
 print("npu count:", torch.npu.device_count())
 PY
-
-readlink -f /usr/local/Ascend/ascend-toolkit/latest
 """,
-        "硬件与软件环境自检",
-    )
-    doc.p(
-        "先别急着编译。`npu-smi info` 失败先查 NPU 驱动与容器挂载；`platform.machine()` 不是 `aarch64`，"
-        "说明镜像或节点不对；`vllm.__file__` 为 `None`，说明当前目录的 `vllm/` 挡住了安装包。"
+        "环境自检",
     )
 
 
 def chapter3(doc: Doc):
     doc.set_chapter(3)
-    doc.h1("三、编译指导")
+    doc.h1("三、从零跑通（按顺序执行）")
+
     doc.p(
-        "本节列的是官方预编译包（run 包）用的编译参数。集成方一般直接用官方包，不用自己编；"
-        "只有改了 kernel、适配新 SOC，或者官方包没覆盖你用的版本，才需要照本节重编，"
-        "重编时照抄这些参数就行，产物和官方包一致。"
+        "这一章是从零到算子可用的完整流程，命令按顺序执行即可。尖括号里的内容（如 `<容器名>`、`<本机 IP>`）"
+        "要换成自己的实际值，其余保持原样。每一步末尾都有检查点：看到期望结果再进下一步，没通过就翻附录 B。"
     )
 
-    doc.h2("3.1 拉取镜像并启动容器")
+    doc.h2("3.1 第 1 步：拉镜像、启动容器")
     doc.p(
-        "本机已有 `vllm-ascend:30.0-a3` 的可以跳过拉取，直接用下面的 docker run 启动。"
+        "在宿主机上执行，不是在容器里。机器上已有 `vllm-ascend:30.0-a3` 的可以跳过拉取。"
     )
     doc.code(
-        """
+        r"""
 export IMAGE=registry-cbu.huawei.com/ascend/vllm-ascend:v0.30.0-a3
 docker images | grep vllm-ascend
 docker pull "$IMAGE"
 """,
-        "查看并拉取镜像",
+        "拉取镜像",
     )
-    doc.p("启动容器，把 NPU 设备、驱动和代码目录挂进去：")
+    doc.p(
+        "启动容器。下面这条命令把 8 张 NPU 卡、驱动和常用目录都挂进去；`<容器名>` 自己起一个，比如 `fsao`。"
+    )
     doc.code(
-        """
-docker run --name <容器名> -it -d --net=host --shm-size=500g \\
-  --privileged=true \\
-  -w /home \\
-  --device=/dev/davinci0 --device=/dev/davinci1 \\
-  --device=/dev/davinci2 --device=/dev/davinci3 \\
-  --device=/dev/davinci4 --device=/dev/davinci5 \\
-  --device=/dev/davinci6 --device=/dev/davinci7 \\
-  --device=/dev/davinci_manager \\
-  --device=/dev/hisi_hdc \\
-  --device=/dev/devmm_svm \\
-  --entrypoint=bash \\
-  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
-  -v /usr/local/dcmi:/usr/local/dcmi \\
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \\
-  -v /usr/local/sbin:/usr/local/sbin \\
-  -v /home:/home \\
-  -v /tmp:/tmp \\
-  -v /data:/data \\
-  -v /mnt/:/mnt/ \\
-  -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \\
-  -v /etc/hccn.conf:/etc/hccn.conf \\
-  -e http_proxy=$http_proxy \\
-  -e https_proxy=$https_proxy \\
+        r"""
+docker run --name <容器名> -it -d --net=host --shm-size=500g \
+  --privileged=true \
+  -w /home \
+  --device=/dev/davinci0 --device=/dev/davinci1 \
+  --device=/dev/davinci2 --device=/dev/davinci3 \
+  --device=/dev/davinci4 --device=/dev/davinci5 \
+  --device=/dev/davinci6 --device=/dev/davinci7 \
+  --device=/dev/davinci_manager \
+  --device=/dev/hisi_hdc \
+  --device=/dev/devmm_svm \
+  --entrypoint=bash \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/sbin:/usr/local/sbin \
+  -v /home:/home \
+  -v /tmp:/tmp \
+  -v /data:/data \
+  -v /mnt/:/mnt/ \
+  -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+  -v /etc/hccn.conf:/etc/hccn.conf \
+  -e http_proxy=$http_proxy \
+  -e https_proxy=$https_proxy \
   "$IMAGE"
 """,
         "启动容器",
     )
-    doc.p(
-        "容器启动后执行 `docker exec -it <容器名> bash` 进入。先跑 `npu-smi info` 确认能看到设备，"
-        "再看 `python3 --version`；`npu-smi info` 失败就先查宿主机驱动和容器设备挂载，别继续往下走。"
+    doc.p("进入容器：")
+    doc.code("docker exec -it <容器名> bash", "进入容器")
+    doc.p("检查点：能看到 8 张卡、Python 版本正常、架构是 aarch64。")
+    doc.code(
+        r"""
+npu-smi info
+python3 -c "import platform; print(platform.machine())"
+""",
+        "确认容器里的设备",
     )
 
-    doc.h2("3.2 编译环境准备")
+    doc.h2("3.2 第 2 步：拉代码、配环境")
     doc.p(
-        "先把代码拉下来。代理和 pip 镜像按实际网络环境配，不需要就跳过前几行；"
-        "PR #20927 的代码直接从官方仓库拉取引用，不必 fork："
+        "代理和 pip 镜像按实际网络环境配，不需要就跳过前几行。PR #20927 的代码直接从官方仓库拉取引用，不必 fork。"
     )
     doc.code(
-        """
+        r"""
 export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 export PIP_TRUSTED_HOST="repo.huaweicloud.com mirrors.huaweicloud.com"
 
@@ -762,9 +686,13 @@ git checkout pr20927
 """,
         "配置代理并拉取 PR 代码",
     )
-    doc.p("进入仓库根目录后配置编译环境，变量只对当前 shell 生效：")
+    doc.p(
+        "代码会拉到 `~/vllm-ascend`。后面的命令都在这个目录里执行；换终端时先 `cd ~/vllm-ascend`，"
+        "并重新跑一遍下面的环境变量。"
+    )
+    doc.p("配置编译环境变量（只对当前终端生效）：")
     doc.code(
-        """
+        r"""
 export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
 source "$ASCEND_HOME_PATH/set_env.sh"     # 部分版本为 bin/setenv.bash
 
@@ -772,75 +700,36 @@ unset LD_PRELOAD
 export DRIVER_LIBS=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver
 export LD_LIBRARY_PATH="$DRIVER_LIBS:/usr/local/Ascend/driver/lib64/common:${LD_LIBRARY_PATH:-}"
 
-export SOC_VERSION=ascend910_9382          # 运行期芯片型号
+export SOC_VERSION=ascend910_9382
 export MAX_JOBS=8
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 """,
         "编译环境变量",
     )
-    doc.p(
-        "确认 ninja 没有被其它 Python 环境劫持，否则会出现“编译到一半找不到 ninja”或链接到旧版本的问题："
-    )
+    doc.p("安装编译和测试依赖：")
     doc.code(
-        """
+        r"""
+python3 -m pip install -r requirements-dev.txt
+""",
+        "安装依赖",
+    )
+    doc.p("检查点：`ninja --version` 要能正常打印版本号，且 `which ninja` 在当前 Python 环境里。")
+    doc.code(
+        r"""
 which python3
 which ninja
-ninja --version          # 必须正常打印版本号
+ninja --version
 """,
-        "检查 ninja 指向",
+        "检查 ninja",
     )
 
-    doc.h2("3.3 编译参数清单")
+    doc.h2("3.3 第 3 步：安装配套 vLLM")
     doc.p(
-        "vllm-ascend 有两种构建入口：`pip install -e .`（同时构建 Python 扩展与全部自定义算子）"
-        "与 `csrc/build.sh` / `csrc/build_aclnn.sh`（只构建算子 run 包）。官方预编译包使用全量参数。"
-    )
-    doc.table(
-        "编译参数清单",
-        ["参数 / 变量", "官方预编译包取值", "作用"],
-        [
-            ["`COMPILE_CUSTOM_KERNELS`", "`1`", "`pip install -e .` 时编译全部 CANN 自定义算子；`0` 只装 Python 包，不重编算子"],
-            ["`SOC_VERSION`（构建）", "`ascend910_9382`", "传给 build_aclnn.sh，决定编译的芯片型号"],
-            ["`--soc`（build.sh）", "`ascend910_93`", "SoC 简称，对应芯片 `ascend910_9382`；不要写成全名"],
-            ["`--pkg`", "启用", "生成带 kernel bin 的 run 包；不加则为 JIT 包"],
-            ["`--ops`", "缺省（全量）", "逗号分隔的算子 snake 名，只编指定算子"],
-            ["`-j` / `MAX_JOBS`", "`8`", "并行编译任务数"],
-            ["`-O` / `--build-type`", "`O2`（Release）", "编译优化级别"],
-            ["`USE_NINJA` / `VLLM_ASCEND_USE_NINJA`", "`auto`", "构建器选择，auto 时优先 ninja"],
-            ["`VLLM_BATCH_INVARIANT`", "`0`", "为 1 时额外构建 batch invariant 算子包"],
-            ["`--vendor_name`", "`custom`（缺省）", "生成 `custom_transformer` vendor 目录"],
-        ],
-        [5.4, 5.6, 5.6],
-        first_col_bold=True,
-    )
-
-    doc.h3("3.3.1 编译选项（kernel 级）")
-    doc.p(
-        "本算子在 `op_host/CMakeLists.txt` 中显式设置了以下编译选项，二次编译时不要随意去掉，"
-        "否则可能出现同步错误或性能退化："
-    )
-    doc.table(
-        "FusedSparseAttentionOverlap 的 kernel 编译选项",
-        ["选项", "作用"],
-        [
-            ["`--cce-auto-sync=off`", "关闭编译器自动同步，由 kernel 手工管理事件同步"],
-            ["`-Wno-deprecated-declarations`", "屏蔽 CANN 头文件中的弃用告警"],
-            ["`-Werror`", "告警视为错误，保证代码质量"],
-            ["`-fpermissive`", "放宽部分 C++ 语法检查，兼容 AscendC 头文件"],
-            ["`-mllvm -cce-vf-remove-membar=false`", "保留向量化过程中的内存屏障，保证跨核可见性"],
-            ["`-mllvm -cce-aicore-hoist-movemask=false`", "禁止上提 movemask，避免破坏流水时序"],
-        ],
-        [7.0, 9.6],
-    )
-
-    doc.h2("3.4 编译步骤")
-    doc.h3("3.4.1 安装当前分支配套的 vLLM")
-    doc.p(
-        "镜像里预装的 vLLM 不一定和分支匹配，必须切到仓库指定的提交。这一步只动 "
-        "`/vllm-workspace/vllm`，不会切换或修改当前的 vllm-ascend 分支。"
+        "镜像里预装的 vLLM 不一定和分支匹配，必须切到仓库指定的提交。这一步只动 `/vllm-workspace/vllm`，"
+        "不会切换或修改当前的 vllm-ascend 分支。"
     )
     doc.code(
-        """
+        r"""
 export VLLM_COMMIT="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
 export VLLM_SRC=/vllm-workspace/vllm
 
@@ -856,58 +745,43 @@ VLLM_TARGET_DEVICE=empty python3 -m pip install -e "$VLLM_SRC" --no-build-isolat
 """,
         "安装配套 vLLM",
     )
-
-    doc.h3("3.4.2 全量包（官方包方式，推荐）")
+    doc.p("检查点：vLLM 的提交号和 `.github/vllm-main-verified.commit` 一致，且能从当前 Python 导入。")
     doc.code(
-        """
-cd /path/to/vllm-ascend
+        r"""
+git -C /vllm-workspace/vllm rev-parse HEAD
+cat .github/vllm-main-verified.commit
+python3 -c "import vllm; print(vllm.__file__)"
+""",
+        "确认 vLLM 提交",
+    )
+
+    doc.h2("3.4 第 4 步：编译并安装 vllm-ascend")
+    doc.p(
+        "全量编译约 40 个 A3 自定义算子与 Python 扩展，首次通常要 30 分钟以上，建议放在 tmux 里跑。"
+    )
+    doc.code(
+        r"""
+cd ~/vllm-ascend
 rm -rf csrc/build csrc/build_out csrc/output build
 
 COMPILE_CUSTOM_KERNELS=1 python3 -m pip install -e . --no-build-isolation
 """,
-        "全量编译并安装 vllm-ascend",
+        "全量编译安装",
     )
-    doc.p(
-        "该命令会编译约 40 个 A3 自定义算子与 Python 扩展。首次构建通常需要 30 分钟以上，"
-        "建议放在 tmux / nohup 中执行。看到以下信息表示成功："
-    )
+    doc.p("检查点：最后出现下面两行就说明装好了。")
     doc.code(
-        """
+        r"""
 Successfully built vllm_ascend
 Successfully installed ... vllm_ascend-...
 """,
-        "安装成功标志",
+        "安装成功的标志",
     )
 
-    doc.h3("3.4.3 换算子 / 换分支后的重编")
-    doc.p(
-        "`git checkout` 之后必须重新编译算子。`COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包，不会重编算子；"
-        "增量构建不需要删除 `csrc/build`，保留它、`touch` 改动文件后重跑即可。只有 CMake 配置或算子列表变化时才需要清理。"
-    )
+    doc.h2("3.5 第 5 步：确认算子能加载")
+    doc.p("加载自定义算子包，确认算子已经注册：")
     doc.code(
-        'bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"',
-        "增量编译算子（不重装 vllm-ascend）",
-    )
-
-    doc.h2("3.5 产物清单")
-    doc.table(
-        "编译产物与安装位置",
-        ["产物", "路径", "说明"],
-        [
-            ["算子 run 包", "`csrc/build/cann-ops-transformer*.run`", "可单独分发、单独安装"],
-            ["算子包根目录", "`vllm_ascend/_cann_ops_custom/vendors/custom_transformer/`", "运行时通过 set_env.bash 挂载"],
-            ["kernel 二进制", "`.../custom_transformer/op_impl/ai_core/tbe/kernel/`\n（按 SOC / arch 分目录）", "按 SOC / arch 分目录，arch22 对应 A2/A3"],
-            ["环境脚本", "`.../custom_transformer/bin/set_env.bash`", "设置 `ASCEND_CUSTOM_OPP_PATH` 与库路径"],
-            ["Python 扩展", "`vllm_ascend/vllm_ascend_C*.so`", "torch 自定义算子注册入口"],
-        ],
-        [3.6, 9.4, 3.6],
-        first_col_bold=True,
-    )
-
-    doc.h2("3.6 编译结果验收")
-    doc.code(
-        """
-cd /path/to/vllm-ascend
+        r"""
+cd ~/vllm-ascend
 source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
 
 python3 - <<'PY'
@@ -921,40 +795,15 @@ PY
 """,
         "确认算子已注册",
     )
-    doc.p("必须输出 `算子加载成功`。随后可运行 附录 A 的精度用例，期望 `4 passed`。")
-
-    doc.h2("3.7 编译失败排查")
-    doc.table(
-        "编译阶段常见失败",
-        ["现象", "原因", "处理"],
-        [
-            ["`ModuleNotFoundError: No module named 'setuptools_rust'`", "缺少编译依赖", "`python3 -m pip install setuptools-rust` 后重跑"],
-            ["`No module named 'ninja'`，或 ninja 路径指向其它 Python", "ninja 来自其它 Python 环境", "重装 ninja，调整 PATH 后 `hash -r`"],
-            ["`libgraph_base.so: undefined symbol`", "复用了其它 CANN 版本留下的 CMake / ninja 缓存", "清理 `csrc/build`、`csrc/build_out`、`csrc/output`、`build` 后全量重编"],
-            ["`build_aclnn.sh` 非零退出", "环境变量、SOC 或依赖不满足", "查看日志第一处 `[ERROR]`，逐项核对 3.2"],
-            ["`catlass is missing, try to fetch it` 后失败", "未初始化子模块 / 代理不可用", "`git submodule update --init --recursive` 后重试"],
-            ["`ERROR: Failed building wheel for vllm_ascend`", "算子编译失败", "向上翻日志找到第一个 error，而不是只看最后一行"],
-        ],
-        [6.8, 5.0, 4.8],
-        first_col_bold=True,
-        keep=False,
-    )
-    doc.p(
-        "构建末尾可能出现 `skip ...`（文档、示例或当前 SOC 不涉及的项），这是正常的；"
-        "以 `op ok` 与单算子 `4 passed` 为准。若跳过的是 vendor 包安装，则需要排查。",
-        size=9.8,
-        color=GRAY,
-    )
+    doc.p("检查点：输出 `算子加载成功`。到这一步，编译和安装就完成了。")
 
 
 def chapter4(doc: Doc):
     doc.set_chapter(4)
-    doc.h1("四、接入指导")
+    doc.h1("四、启动推理服务")
 
-    doc.h2("4.1 接入模型的约束")
-    doc.p(
-        "只有带 Indexer 的稀疏注意力模型才走这条路径，落地时要同时满足模型结构和 KV 缓存两方面的条件："
-    )
+    doc.h2("4.1 能接哪些模型")
+    doc.p("只有带 Indexer 的稀疏注意力模型才走这条路径，落地时要同时满足模型结构和 KV 缓存两方面的条件：")
     doc.bullets([
         "权重 config 里有 `index_topk`，没有 `compress_ratios`。GLM-5.x 属于这一类；DeepSeek-V4 系列带 CSA2 "
         "压缩，不走这条路径。",
@@ -976,20 +825,14 @@ def chapter4(doc: Doc):
         [4.2, 4.0, 8.4],
         first_col_bold=True,
     )
-    doc.p(
-        "权重自检看 `config.json`：有 `index_topk`、没有 `compress_ratios` 才符合要求；"
-        "再看 `quant_model_description.json` 里有没有 c8。"
-    )
 
-    doc.h2("4.2 框架内接入（vLLM / PyTorch 自定义算子）")
-    doc.h3("4.2.1 整网接入配置")
+    doc.h2("4.2 启动服务")
     doc.p(
-        "整网只有同时满足三个条件，才会走到本算子：模型带 `index_topk`（GLM-5.x）、"
-        "开启 `sparse_kv_offload_config.enabled`、且 `use_fused_overlap=true`。"
-        "缺少 offload 配置时服务只是普通推理，算子一次都不会执行。"
+        "先准备好模型权重（本文用 GLM-5.1-w4a8，约 391GB），把 `MODEL_PATH` 指到权重目录。网卡名和 IP 用"
+        "下面第一条命令查，挑一个不是 127.0.0.1 的，第二列就是网卡名。服务参数按 16 卡、TP16 写的。"
     )
     doc.code(
-        """
+        r"""
 export MODEL_PATH=/path/to/模型权重
 
 # 查看本机网卡和 IP，第二列是网卡名
@@ -1006,16 +849,21 @@ unset HCCL_INTRA_ROCE_ENABLE
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve "$MODEL_PATH" \\
-  --tensor-parallel-size 16 \\
-  --enable-expert-parallel \\
-  --max-num-seqs 8 \\
-  --max-model-len 40960 \\
-  --max-num-batched-tokens 4096 \\
-  --quantization ascend \\
-  --gpu-memory-utilization 0.90 \\
-  --enable-chunked-prefill \\
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \\
+vllm serve "$MODEL_PATH" \
+  --host 0.0.0.0 --port 8000 \
+  --served-model-name glm-5.1 \
+  --data-parallel-size 1 \
+  --tensor-parallel-size 16 \
+  --enable-expert-parallel \
+  --max-num-seqs 8 \
+  --max-model-len 40960 \
+  --max-num-batched-tokens 4096 \
+  --trust-remote-code \
+  --quantization ascend \
+  --gpu-memory-utilization 0.90 \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{
     "sparse_kv_offload_config": {
       "enabled": true,
@@ -1025,49 +873,68 @@ vllm serve "$MODEL_PATH" \\
     }
   }'
 """,
-        "整网启动参数（单机调试形态）",
+        "启动推理服务",
     )
-    doc.table(
-        "整网参数约束",
-        ["约束", "说明"],
-        [
-            ["不要设置 `--kv-cache-dtype int8/fp8`", "主 KV 会变成 C8 packed cache，sparse offload 直接拒绝"],
-            ["权重不能是 c8", "`w8a8c8` / `w4a8c8` 均被拒绝"],
-            ["不要开 `enable_dsa_cp`", "sparse offload 不支持 context parallel"],
-            ["`dram_size_per_dp_GB` 按主机内存调整", "host 连续内存不足时先下调（例如 48）"],
-            ["`use_fused_overlap=false` 不是旧 kernel 基线", "关闭后走 Copy-SFA 路径，A/B 结论不能混用"],
-            ["`tensor-parallel-size` 与权重匹配", "391GB 权重在 TP16 下约 24.5GB/chip，TP8 会挤占 KV 空间"],
-        ],
-        [6.4, 9.8],
-        first_col_bold=True,
-    )
-
-    doc.h2("4.3 结构验证")
     doc.p(
-        "进程不崩，不代表接入成功。结构验证看的是算子确实被调用、offload 路径生效、服务可用。"
+        "首次启动要从磁盘加载权重，日志停在 loading 阶段十几分钟是正常的。看到 "
+        "`Application startup complete` 就说明服务起来了。另开一个终端执行："
     )
-
-    doc.h3("4.3.1 整网结构验证")
-    doc.bullets([
-        "先确认算子被调用。`use_fused_overlap=true` 时 decode 走 `_execute_fused_overlap_offload_decode`，"
-        "内部通过 `_require_custom_op(\"npu_fused_sparse_attention_overlap\")` 取算子，缺了会直接抛错。"
-        "所以请求能正常返回、日志没异常，就说明算子跑过。",
-        "再看 offload 路径是否生效：`curl /metrics | grep prefix_cache` 能查到 `vllm:prefix_cache_*` 指标。",
-        "服务本身要可用：`/health` 返回 200，`/v1/chat/completions` 能返回结果。",
-        "最后看性能：TPOT 随命中率提升而下降。和 `use_fused_overlap=false` 比，能确认走的是不同路径，但后者不是旧 kernel 基线，别拿来做 A/B。",
-    ])
     doc.code(
-        """
+        r"""
 curl -s http://127.0.0.1:8000/health; echo
-curl -s http://127.0.0.1:8000/metrics | grep prefix_cache | head
-curl -s http://127.0.0.1:8000/v1/chat/completions \\
-  -H 'Content-Type: application/json' \\
+""",
+        "检查服务是否就绪",
+    )
+    doc.p("检查点：返回 `{\"status\":\"ok\"}`，或者直接进入 4.3 发一条请求看结果。")
+
+    doc.h2("4.3 发一个请求")
+    doc.code(
+        r"""
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
   -d '{"model":"glm-5.1","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"temperature":0}'
 """,
-        "整网验收命令",
+        "发一条对话请求",
+    )
+    doc.p(
+        "检查点：返回 JSON 里有 `choices` 字段和模型输出。能返回结果，说明服务通、算子也被调用过了。"
     )
 
-    doc.h3("4.3.2 验证清单")
+
+def chapter5(doc: Doc):
+    doc.set_chapter(5)
+    doc.h1("五、验证算子确实生效")
+
+    doc.p("进程不崩、请求能回，不代表走的是这个算子。下面三件事按顺序确认。")
+
+    doc.h2("5.1 看指标")
+    doc.code(
+        r"""
+curl -s http://127.0.0.1:8000/metrics | grep prefix_cache | head
+""",
+        "查看 prefix cache 指标",
+    )
+    doc.p("检查点：能查到 `vllm:prefix_cache_*`，说明 sparse offload 路径整体生效。")
+
+    doc.h2("5.2 跑单算子精度测试")
+    doc.p(
+        "测试用例依赖 FLA（`fla_npu`）。如果环境里没有，按仓库要求从 "
+        "https://github.com/flashserve/flash-linear-attention-npu/releases 下载 aarch64 wheel 后安装；"
+        "这一步只影响精度测试，不影响上面的推理服务。"
+    )
+    doc.code(
+        r"""
+cd ~/vllm-ascend
+source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py
+""",
+        "运行仓内精度用例",
+    )
+    doc.p("检查点：最后一行是 `4 passed`。")
+
+    doc.h2("5.3 验证清单")
     doc.table(
         "结构验证清单",
         ["层次", "验证项", "通过标准"],
@@ -1075,7 +942,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \\
             ["编译", "算子注册", "`hasattr(torch.ops._C_ascend, \"npu_fused_sparse_attention_overlap\")` 为 True"],
             ["单算子", "仓内精度用例", "`4 passed`"],
             ["单算子", "状态正确性", "`status[topk] == topk`，Cache 与 Gather 结果一致"],
-            ["整网", "服务可用", "`/health` 200，decode 请求正常返回"],
+            ["整网", "服务可用", "`/health` 200，对话请求正常返回"],
             ["整网", "路径生效", "`/metrics` 有 `vllm:prefix_cache_*`"],
             ["整网", "性能", "TPOT 稳定，命中率提升时搬运开销下降"],
         ],
@@ -1085,66 +952,94 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \\
 
 
 def appendix(doc: Doc):
-    doc.set_chapter(5)
-    doc.h1("五、附录")
+    doc.set_chapter("A")
+    doc.h1("六、附录")
 
-    doc.h2("附录 A  单算子测试速查")
-    doc.code(
-        """
-cd /path/to/vllm-ascend
-export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit
-source "$ASCEND_HOME_PATH/set_env.sh"
-source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
-
-unset LD_PRELOAD
-export DRIVER_LIBS=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver
-export LD_LIBRARY_PATH="$DRIVER_LIBS:/usr/local/Ascend/driver/lib64/common:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-export ASCEND_RT_VISIBLE_DEVICES=0
-export SOC_VERSION=ascend910_9382
-
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py
-""",
-        "重新进入容器后的完整复测命令",
-    )
-
-    doc.h2("附录 B  整网最小启动命令")
-    doc.code(
-        """
-export MODEL_PATH=/path/to/模型权重
-export HCCL_IF_IP=<本机 IP>
-export HCCL_SOCKET_IFNAME=<网卡名>
-export GLOO_SOCKET_IFNAME=<网卡名>
-export HCCL_BUFFSIZE=512
-export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
-vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
-  --served-model-name glm-5.1 \\
-  --data-parallel-size 1 --tensor-parallel-size 16 --enable-expert-parallel \\
-  --max-num-seqs 8 --max-model-len 40960 --max-num-batched-tokens 4096 \\
-  --trust-remote-code --quantization ascend --gpu-memory-utilization 0.90 \\
-  --enable-chunked-prefill --enable-prefix-caching \\
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \\
-  --additional-config '{
-    "sparse_kv_offload_config": {
-      "enabled": true,
-      "use_fused_overlap": true,
-      "keep_device_kv_cache": true,
-      "dram_size_per_dp_GB": 48
-    }
-  }'
-""",
-        "单机整网启动",
-    )
-
-    doc.h2("附录 C  运行期常见问题")
+    doc.h2("附录 A  编译参数与产物")
+    doc.p("主流程用的是全量编译命令，一般不用改。需要调整构建方式时看下面两张表。")
     doc.table(
-        "运行期问题排查",
+        "编译参数清单",
+        ["参数 / 变量", "官方预编译包取值", "作用"],
+        [
+            ["`COMPILE_CUSTOM_KERNELS`", "`1`", "`pip install -e .` 时编译全部 CANN 自定义算子；`0` 只装 Python 包，不重编算子"],
+            ["`SOC_VERSION`（构建）", "`ascend910_9382`", "传给 build_aclnn.sh，决定编译的芯片型号"],
+            ["`--soc`（build.sh）", "`ascend910_93`", "SoC 简称，对应芯片 `ascend910_9382`；不要写成全名"],
+            ["`--pkg`", "启用", "生成带 kernel bin 的 run 包；不加则为 JIT 包"],
+            ["`--ops`", "缺省（全量）", "逗号分隔的算子 snake 名，只编指定算子"],
+            ["`-j` / `MAX_JOBS`", "`8`", "并行编译任务数"],
+            ["`-O` / `--build-type`", "`O2`（Release）", "编译优化级别"],
+            ["`USE_NINJA` / `VLLM_ASCEND_USE_NINJA`", "`auto`", "构建器选择，auto 时优先 ninja"],
+            ["`VLLM_BATCH_INVARIANT`", "`0`", "为 1 时额外构建 batch invariant 算子包"],
+        ],
+        [5.4, 5.6, 5.6],
+        first_col_bold=True,
+    )
+    doc.table(
+        "本算子的 kernel 编译选项",
+        ["选项", "作用"],
+        [
+            ["`--cce-auto-sync=off`", "关闭编译器自动同步，由 kernel 手工管理事件同步"],
+            ["`-Wno-deprecated-declarations`", "屏蔽 CANN 头文件中的弃用告警"],
+            ["`-Werror`", "告警视为错误，保证代码质量"],
+            ["`-fpermissive`", "放宽部分 C++ 语法检查，兼容 AscendC 头文件"],
+            ["`-mllvm -cce-vf-remove-membar=false`", "保留向量化过程中的内存屏障，保证跨核可见性"],
+            ["`-mllvm -cce-aicore-hoist-movemask=false`", "禁止上提 movemask，避免破坏流水时序"],
+        ],
+        [7.0, 9.6],
+    )
+    doc.table(
+        "编译产物与安装位置",
+        ["产物", "路径", "说明"],
+        [
+            ["算子 run 包", "`csrc/build/cann-ops-transformer*.run`", "可单独分发、单独安装"],
+            ["算子包根目录", "`vllm_ascend/_cann_ops_custom/vendors/custom_transformer/`", "运行时通过 set_env.bash 挂载"],
+            ["kernel 二进制", "`.../custom_transformer/op_impl/ai_core/tbe/kernel/`\n（按 SOC / arch 分目录）", "arch22 对应 A2/A3"],
+            ["环境脚本", "`.../custom_transformer/bin/set_env.bash`", "设置 `ASCEND_CUSTOM_OPP_PATH` 与库路径"],
+            ["Python 扩展", "`vllm_ascend/vllm_ascend_C*.so`", "torch 自定义算子注册入口"],
+        ],
+        [3.6, 9.4, 3.6],
+        first_col_bold=True,
+    )
+    doc.p(
+        "只改了 kernel、不想重装 vllm-ascend 时，`touch` 改动文件后重跑编译脚本即可，"
+        "`COMPILE_CUSTOM_KERNELS=0` 只重装 Python 包、不会重编算子："
+    )
+    doc.code('bash csrc/build_aclnn.sh "$PWD" "$SOC_VERSION"', "增量编译算子（不重装 vllm-ascend）")
+
+    doc.h2("附录 B  常见报错与处理")
+
+    doc.h3("B.1 环境自检不过")
+    doc.bullets([
+        "`npu-smi info` 失败：先查宿主机 NPU 驱动和容器设备挂载（`--device=/dev/davinci*` 等），"
+        "容器里没有设备时后面的步骤都会失败。",
+        "`platform.machine()` 不是 `aarch64`：拉错了镜像，或者跑在 x86 节点上。",
+        "`torch.npu.device_count()` 是 0：容器启动时没挂 `--device`，或者宿主机驱动异常。",
+        "`vllm.__file__` 为 `None`：当前目录下有名为 `vllm/` 的目录遮蔽了安装包，换目录执行。",
+    ])
+
+    doc.h3("B.2 编译阶段")
+    doc.table(
+        "编译阶段常见失败",
         ["现象", "原因", "处理"],
         [
-            ["`operator not found` / 算子缺失", "算子包没装上，或环境没重新加载", "按 3.4.2 安装全量包；新终端 source set_env.bash；重启进程"],
+            ["`ModuleNotFoundError: No module named 'setuptools_rust'`", "缺少编译依赖", "`python3 -m pip install setuptools-rust` 后重跑"],
+            ["`No module named 'ninja'`，或 ninja 路径指向其它 Python", "ninja 来自其它 Python 环境", "重装 ninja，调整 PATH 后 `hash -r`"],
+            ["`libgraph_base.so: undefined symbol`", "复用了其它 CANN 版本留下的 CMake / ninja 缓存", "清理 `csrc/build`、`csrc/build_out`、`csrc/output`、`build` 后全量重编"],
+            ["`build_aclnn.sh` 非零退出", "环境变量、SOC 或依赖不满足", "查看日志第一处 `[ERROR]`，逐项核对 3.2"],
+            ["`catlass is missing, try to fetch it` 后失败", "未初始化子模块 / 代理不可用", "`git submodule update --init --recursive` 后重试"],
+            ["`ERROR: Failed building wheel for vllm_ascend`", "算子编译失败", "向上翻日志找到第一个 error，而不是只看最后一行"],
+        ],
+        [6.8, 5.0, 4.8],
+        first_col_bold=True,
+        keep=False,
+    )
+
+    doc.h3("B.3 运行与推理")
+    doc.table(
+        "运行期常见问题",
+        ["现象", "原因", "处理"],
+        [
+            ["`operator not found` / 算子缺失", "算子包没装上，或环境没重新加载", "按 3.4 重新安装；新终端 source set_env.bash；重启进程"],
             ["`libcust_opapi.so` 加载失败", "环境变量未生效或库路径不对", "source 算子包的 set_env.bash，检查 `ASCEND_CUSTOM_OPP_PATH`"],
             ["`does not support packed SFA main caches (C8 or TQ4)`", "权重为 c8 或设置 kv-cache-dtype", "换非 c8 权重，去掉 `--kv-cache-dtype`"],
             ["`Sparse KV offload don't support compress now`", "权重带 `compress_ratios`", "换标准 DSA 权重（GLM-5.1/5.2）"],
@@ -1153,12 +1048,14 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
             ["`HCCL_BUFFSIZE_EP is too SMALL`", "MoE AllToAll 缓冲区不足", "`export HCCL_BUFFSIZE=512` 后重启"],
             ["`HCCL_INTRA_PCIE_ENABLE or HCCL_INTRA_ROCE_ENABLE is invalid`", "只设置了一个 intra 变量", "两个都 unset，或显式 PCIE=1 + ROCE=0"],
             ["加载到 `Loading safetensors checkpoint shards: 0%` 长时间不动", "大权重首次加载", "正常等待，可看 `/proc/<pid>/io` 的 read_bytes 是否增长"],
+            ["`RuntimeError: HCCL ... error code is 19`", "网卡选择失败或 hostname 解析不到", "设置 `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME`，检查 `/etc/hosts`"],
         ],
         [6.8, 4.8, 5.0],
         first_col_bold=True,
+        keep=False,
     )
 
-    doc.h2("附录 D  术语表")
+    doc.h2("附录 C  术语表")
     doc.table(
         "术语与缩写",
         ["术语", "含义"],
@@ -1172,19 +1069,17 @@ vllm serve "$MODEL_PATH" --host 0.0.0.0 --port 8000 \\
             ["All-Hit", "本次 TopK 全部已驻留，搬运量为 0 的情形"],
             ["PA_BSND", "PageAttention 分页布局，逻辑块经 Block Table 映射到物理块"],
             ["TND", "以 Token 数、Head 数、HeadDim 组织的 query 排布"],
-            ["All-Hit 幂等", "同样输入下第二次调用不改变输出与状态"],
         ],
         [4.2, 12.0],
         first_col_bold=True,
     )
 
-    doc.h2("附录 E  参考资料")
+    doc.h2("附录 D  参考资料")
     doc.bullets([
         "PR #20927：https://github.com/vllm-project/vllm-ascend/pull/20927",
         "算子 README：`csrc/attention/fused_sparse_attention_overlap/README.md`",
         "精度用例：`tests/e2e/nightly/single_node/ops/singlecard_ops/` 下的 `test_fused_sparse_attention_overlap.py`",
         "整网接入：`FSAO_整网接入指导手册.md`（同仓库）",
-        "单算子编译：`Pooling_SFA算子编译指导.md`（同仓库）",
         "vLLM Ascend 文档：https://docs.vllm.ai/projects/ascend/en/latest/",
     ])
 
@@ -1201,6 +1096,7 @@ def build():
     chapter2(doc)
     chapter3(doc)
     chapter4(doc)
+    chapter5(doc)
     appendix(doc)
     doc.save(OUT_DOCX)
     print("docx written:", OUT_DOCX)
