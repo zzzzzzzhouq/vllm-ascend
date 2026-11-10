@@ -713,7 +713,7 @@ def chapter2(doc: Doc):
         "软件要求",
         ["组件", "要求 / 取值", "说明"],
         [
-            ["容器镜像", "官方 vllm-ascend A3 镜像", "镜像标签以实际发布为准；镜像内已含 CANN、torch、torch_npu"],
+            ["容器镜像", "`vllm-ascend:30.0-a3`", "镜像仓中的标签为 `v0.30.0-a3`；镜像内已含 CANN、torch、torch_npu"],
             ["操作系统", "镜像自带 Linux（aarch64）", "不要替换系统自带的 glibc / gcc"],
             ["Python", "镜像内置", "与镜像保持一致，不要另装一套"],
             ["CANN", "镜像内置", "统一通过 `/usr/local/Ascend/ascend-toolkit` 加载，不要硬编码带版本号的路径"],
@@ -729,11 +729,11 @@ def chapter2(doc: Doc):
 
     doc.h2("2.3 拉取镜像并启动容器")
     doc.p(
-        "本机已有镜像的可以跳过拉取，直接用下面的 docker run 启动；镜像标签以实际发布为准。"
+        "本机已有 `vllm-ascend:30.0-a3` 的可以跳过拉取，直接用下面的 docker run 启动。"
     )
     doc.code(
         """
-export IMAGE=<官方 vllm-ascend A3 镜像>
+export IMAGE=registry-cbu.huawei.com/ascend/vllm-ascend:v0.30.0-a3
 docker images | grep vllm-ascend
 docker pull "$IMAGE"
 """,
