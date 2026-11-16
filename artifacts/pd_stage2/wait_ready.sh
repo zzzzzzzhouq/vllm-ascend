@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# 等待某个端口 /v1/models 就绪
+# 等待某个端口就绪。
+# vLLM 引擎的 /v1/models 返回 200；layerwise proxy 不实现该端点，返回 404。
+# 只要拿到任意 HTTP 响应（不是连接失败/000）就认为服务已起来。
 # 用法: ./wait_ready.sh <port> [timeout_seconds]
 set -euo pipefail
 port="${1:?usage: wait_ready.sh <port> [timeout]}"
 timeout_s="${2:-3600}"
 deadline=$(( $(date +%s) + timeout_s ))
 while :; do
-  if curl -fsS --max-time 3 "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; then
-    echo "port $port ready"
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+          "http://127.0.0.1:$port/v1/models" 2>/dev/null || true)
+  if [ -n "$code" ] && [ "$code" != "000" ]; then
+    echo "port $port ready (HTTP $code)"
     exit 0
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then

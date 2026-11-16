@@ -19,7 +19,14 @@ export SERVED_NAME=${SERVED_NAME:-glm-5.1}
 
 export PRE_FILL_NPUS=${PRE_FILL_NPUS:-0,1,2,3,4,5,6,7}
 export DECODE_NPUS=${DECODE_NPUS:-8,9,10,11,12,13,14,15}
-export TP=${TP:-8}
+
+# TP 默认按 NPU 列表长度自动定，避免旧 shell 里残留的 TP=16 污染（8 张卡上 rank 越界）
+_n_p=$(echo "$PRE_FILL_NPUS" | awk -F, '{print NF}')
+_n_d=$(echo "$DECODE_NPUS" | awk -F, '{print NF}')
+if [ "$_n_p" != "$_n_d" ]; then
+  echo "[stage2] WARN: prefill/decode NPU 数量不一致: $_n_p vs $_n_d" >&2
+fi
+export TP=${PD_TP:-$_n_p}
 
 export P_PORT=${P_PORT:-8100}
 export D_PORT=${D_PORT:-8200}
@@ -73,7 +80,7 @@ export LD_LIBRARY_PATH="$PKG/op_api/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 mkdir -p "$LOG_DIR"
 
 echo "[stage2] repo=$REPO model=$MODEL"
-echo "[stage2] P=$PRE_FILL_NPUS:$P_PORT (kv $KV_PORT_P)  D=$DECODE_NPUS:$D_PORT (kv $KV_PORT_D)"
+echo "[stage2] P=$PRE_FILL_NPUS:$P_PORT (kv $KV_PORT_P)  D=$DECODE_NPUS:$D_PORT (kv $KV_PORT_D)  tp=$TP"
 echo "[stage2] max_model_len=$MAX_MODEL_LEN max_num_seqs(D)=$MAX_NUM_SEQS max_num_seqs(P)=$P_MAX_NUM_SEQS"
 echo "[stage2] dram=${DRAM_GB}GB topk_buffer=$TP_BUFFER layerwise_prefill=$USE_LAYERWISE_PREFILL"
 echo "[stage2] proxy=$PROXY_PORT logs=$LOG_DIR  local_ip=$LOCAL_IP nic=$NIC"
