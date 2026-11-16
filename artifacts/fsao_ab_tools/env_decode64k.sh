@@ -7,12 +7,16 @@
 # 客户端旋钮，不要用 repeat_rate 去"模拟"它。
 #
 # 可覆盖：DECODE_BS / DECODE_IN_LEN / DECODE_OUT_LEN / DECODE_DRAM_GB
+#         DECODE_REPEAT_RATE / DECODE_PREFIX_TEST
 # 用法：
 #   source ./env_decode64k.sh
-#   PREFIX_TEST=0 ./round.sh base
+#   ./round.sh base
 # 或直接：
 #   ./abba_decode64k.sh
 #   DECODE_BS=8 DECODE_OUT_LEN=256 ./abba_decode64k.sh
+#   # 高命中干净 A/B（prefill≈0，多请求同时 decode）
+#   DECODE_BS=8 DECODE_OUT_LEN=256 DECODE_REPEAT_RATE=0.99 DECODE_PREFIX_TEST=1 \
+#     ./abba_decode64k.sh
 
 # 被 source 时 $0 是当前 shell，必须用 BASH_SOURCE
 _ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,9 +37,11 @@ export OUTPUT_LEN="$DECODE_OUT_LEN"
 export DATA_NUM="$DECODE_BS"
 export CONCURRENCY="$DECODE_BS"
 export MAX_NUM_SEQS="$DECODE_BS"
-export REPEAT_RATE=0
+# repeat_rate=0 表示各请求上下文独立；0.99 + PREFIX_TEST=1 表示预热后 prefill≈0，
+# 用于"多请求同时 decode"的干净 A/B（KV 共享，只做相对比较）
+export REPEAT_RATE=${DECODE_REPEAT_RATE:-0}
 export NPU_NUM=${NPU_NUM:-16}
-export PREFIX_TEST=0
+export PREFIX_TEST=${DECODE_PREFIX_TEST:-0}
 
 # prompt + output 之上留 2K 余量
 export MAX_MODEL_LEN=${DECODE_MAX_MODEL_LEN:-$((DECODE_IN_LEN + DECODE_OUT_LEN + 2048))}

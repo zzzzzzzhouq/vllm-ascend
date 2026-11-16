@@ -168,12 +168,20 @@ TPOT 量到的是"被 prefill 拖慢的 inter-token 时间"，会到几百 ms，
 同时 decode，后面没有第二批请求插入；`repeat_rate=0` 保证各请求上下文不共享。
 
 ```bash
-# 默认 bs=4 / 64K / out=64
+# 默认 bs=4 / 64K / out=64（各请求独立上下文）
 ./abba_decode64k.sh
 
 # 自定义
 DECODE_BS=8 DECODE_OUT_LEN=256 ./abba_decode64k.sh
+
+# 干净多请求 A/B：99% 前缀命中，预热后 prefill≈0，避免 prefill/decode 重叠
+DECODE_BS=8 DECODE_OUT_LEN=256 DECODE_REPEAT_RATE=0.99 DECODE_PREFIX_TEST=1 \
+  ./abba_decode64k.sh
 ```
+
+> 为什么需要高命中版：chunked prefill 会把长 prompt 的 prefill 串行化
+> （4 条 64K 的 TTFT 约为 26/52/78/104s），先开始的请求 decode 全程与后来的
+> prefill 重叠，TPOT 会被拉到几百 ms。bs=1 或 prefill≈0 才能测到纯 decode。
 
 参数对应 kernel profiling（`tests/ut/test_fuse_sparse_attention_overlap_precisions.py`）：
 
