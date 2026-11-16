@@ -26,8 +26,21 @@ def load(build):
     for path in files:
         df = pd.read_csv(path)
         df.columns = [str(c).strip() for c in df.columns]
+        # 压测工具会在正式行之前写一条 prefix 预热行，TPOT/TTFT 解析失败时是
+        # 99999 哨兵值。汇总必须剔除，否则中位数/极差会被完全污染。
+        if "TPOT avg" in df.columns:
+            tpot = pd.to_numeric(df["TPOT avg"], errors="coerce")
+            keep = tpot < 99999
+            dropped = int((~keep).sum())
+            if dropped:
+                print(f"[info] {os.path.basename(path)}: dropped {dropped} warmup/sentinel row(s)")
+            df = df[keep].copy()
+        if df.empty:
+            continue
         df["__round__"] = os.path.basename(path).replace(".csv", "")
         frames.append(df)
+    if not frames:
+        return None, files
     return pd.concat(frames, ignore_index=True), files
 
 
