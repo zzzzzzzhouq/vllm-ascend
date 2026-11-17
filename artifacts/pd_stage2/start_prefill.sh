@@ -18,6 +18,13 @@ else
   EXTRA=()
 fi
 
+# 可选：--profiler-config（Ascend PyTorch Profiler），输出到 PROFILE_DIR_P
+PROFILE_ARGS=()
+if [ -n "${PROFILE_DIR_P:-}" ]; then
+  mkdir -p "$PROFILE_DIR_P"
+  PROFILE_ARGS=(--profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR_P\", \"torch_profiler_with_stack\": false}")
+fi
+
 nohup vllm serve "$MODEL" \
   --host 0.0.0.0 --port "$P_PORT" --served-model-name "$SERVED_NAME" \
   --data-parallel-size 1 \
@@ -33,6 +40,7 @@ nohup vllm serve "$MODEL" \
   --additional-config '{"multistream_overlap_shared_expert": true}' \
   --kv-transfer-config "$KV_CFG" \
   "${EXTRA[@]+"${EXTRA[@]}"}" \
+  "${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"}" \
   > "$LOG_DIR/prefill.log" 2>&1 &
 echo $! > "$LOG_DIR/prefill.pid"
 echo "prefill started (pid $(cat "$LOG_DIR/prefill.pid")), log: $LOG_DIR/prefill.log"

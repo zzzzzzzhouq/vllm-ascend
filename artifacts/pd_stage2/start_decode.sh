@@ -23,6 +23,13 @@ JSON
 
 KV_CFG='{"kv_connector":"SfaRemoteD2HConnector","kv_role":"kv_consumer","kv_port":"'"$KV_PORT_D"'","kv_connector_extra_config":{"memfabric_transfer_protocol":"sdma"}}'
 
+# 可选：--profiler-config（Ascend PyTorch Profiler），输出到 PROFILE_DIR
+PROFILE_ARGS=()
+if [ -n "${PROFILE_DIR:-}" ]; then
+  mkdir -p "$PROFILE_DIR"
+  PROFILE_ARGS=(--profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}")
+fi
+
 nohup vllm serve "$MODEL" \
   --host 0.0.0.0 --port "$D_PORT" --served-model-name "$SERVED_NAME" \
   --data-parallel-size 1 \
@@ -39,6 +46,7 @@ nohup vllm serve "$MODEL" \
   --hf-overrides "$HF_OVERRIDES" \
   --additional-config "$ADDITIONAL" \
   --kv-transfer-config "$KV_CFG" \
+  "${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"}" \
   > "$LOG_DIR/decode.log" 2>&1 &
 echo $! > "$LOG_DIR/decode.pid"
 echo "decode started (pid $(cat "$LOG_DIR/decode.pid")), log: $LOG_DIR/decode.log"

@@ -86,6 +86,42 @@ python3 aisbench_test.py \
 - 64K 时 prefill 侧 KV 在 device：`MAX_MODEL_LEN=67840 P_MAX_NUM_SEQS=1 P_MAX_BATCHED=4096`；
   decode 侧 KV 在 host：`MAX_NUM_SEQS=4 DRAM_GB=110`（按 host 内存调整）。
 
+## Profiling（算子归因）
+
+用 Ascend PyTorch Profiler，只抓 **decode 引擎（D，8200）**——目标算子、host gather、indexer 都在这里。
+
+```bash
+# 两臂对比：自动换包 -> 起 P/D（带 profiler）-> 发请求 -> 抓 -> 停
+PROF_ROOT=/home/z00943842/base/pd_stage2/prof ./profile_ab.sh base opt
+
+# 每个 arm 独立输出：
+#   prof/<arm>/decode/<...>_ascend_pt   （D 侧 profile）
+#   prof/<arm>/request.json / response.json / *_server.log / meta.txt
+```
+
+解析：
+
+```bash
+./parse_profile.sh /home/z00943842/base/pd_stage2/prof/opt 0   # 取排序后第 0 个 rank
+./parse_profile.sh /home/z00943842/base/pd_stage2/prof/base 0  # 两臂取同一个 rank
+```
+
+单臂手动（不换包）：
+
+```bash
+PROFILE_DIR=$PWD/prof_manual/decode ./start_decode.sh
+curl -X POST http://127.0.0.1:8200/start_profile
+# 经 proxy 9000 发请求
+curl -X POST http://127.0.0.1:8200/stop_profile
+```
+
+注意：
+
+- **换包后必须重启引擎，不需要重新编译**（算子只在进程启动时加载）；
+- proxy 不转发 `/start_profile`、`/stop_profile`，要直接 curl 引擎端口；
+- TP8 会生成 8 个 `*_ascend_pt`，对比时两臂取**同一个 rank**；
+- 只抓 1–2 条、128–512 token；已设置 `torch_profiler_with_stack=false` 降低开销。
+
 ## 算子 A/B
 
 前提：工具 `config.py` 指向 proxy(9000)，`$TOOLS` 下有原来的 `swap_ops.sh`/`env.sh`。
