@@ -139,6 +139,8 @@ private:
         LocalTensor<int16_t> compactPlanLocal, int64_t startRow, int64_t token0Idx,
         int64_t token1Idx, int16_t planValue0, int16_t planValue1,
         const RunInfo &runInfo, ConstInfo &constInfo);
+    __aicore__ inline void CopyInSelectionKvPair(LocalTensor<KV_T> kvInUb, int64_t startRow,
+        int64_t selectionTokenOffset, ConstInfo &constInfo);
     __aicore__ inline void CopyOutSelectionMisses(LocalTensor<KV_T> kvInUb,
         LocalTensor<int16_t> compactPlanLocal, int64_t dealRow,
         int64_t selectionRow, ConstInfo &constInfo);
@@ -214,6 +216,11 @@ private:
     static constexpr int32_t SELECTION_MEMBERSHIP_STORAGE_COUNT = 16400;
     static constexpr int32_t SELECTION_PLAN_LOCAL_OFFSET = 16;
     static constexpr int32_t SELECTION_COMPACT_PLAN_LOCAL_OFFSET = 144;
+    // The plan region between the two offsets must hold one s2BaseSize chunk of int16
+    // plan values; the packed 32-bit decode below relies on it being even-sized.
+    static_assert((SELECTION_COMPACT_PLAN_LOCAL_OFFSET - SELECTION_PLAN_LOCAL_OFFSET) ==
+        static_cast<int32_t>(s2BaseSize), "selection plan region must hold s2BaseSize int16 values");
+    static_assert((s2BaseSize & 1U) == 0, "packed plan decode requires an even s2BaseSize");
 
     int64_t sparseCalSize;
     int64_t sparseS2Start;
@@ -434,20 +441,128 @@ FusedSparseAttentionOverlapVectorService<TEMPLATE_ARGS>::PrepareExternalSelectio
     return true;
 }
 
+// Copy two adjacent selection-cache tokens with one MTE2 issue. Selection rows are
+// densely packed (block * blockSize + slot), so consecutive slots are consecutive
+// rows in both selectionKvCacheGm (512 elems/row) and selectionKRopeGm (64 elems/row).
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
+FusedSparseAttentionOverlapVectorService<TEMPLATE_ARGS>::CopyInSelectionKvPair(
+    LocalTensor<KV_T> kvInUb, int64_t startRow, int64_t selectionTokenOffset,
+    ConstInfo &constInfo)
+{
+    if (selectionTokenOffset < 0) {
+        return;
+    }
+    DataCopyExtParams params;
+    params.blockCount = 2;
+    params.srcStride = 0;
+    DataCopyPadExtParams<KV_T> padParams;
+
+    params.blockLen = constInfo.dSizeNope * sizeof(KV_T);
+    // Gap between the 512-elem KV slices of adjacent 576-elem UB rows, in 32B units.
+    params.dstStride = constInfo.dSizeRope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+    DataCopyPad(kvInUb[startRow * dVTemplateTypeInput],
+        selectionKvCacheGm[selectionTokenOffset * constInfo.dSizeNope], params, padParams);
+
+    params.blockLen = constInfo.dSizeRope * sizeof(KV_T);
+    params.dstStride = constInfo.dSizeNope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+    DataCopyPad(kvInUb[startRow * dVTemplateTypeInput + constInfo.dSizeNope],
+        selectionKRopeGm[selectionTokenOffset * constInfo.dSizeRope], params, padParams);
+}
+
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t
 FusedSparseAttentionOverlapVectorService<TEMPLATE_ARGS>::CopyInKvWithExternalPlan(
     LocalTensor<KV_T> kvInUb, LocalTensor<int16_t> compactPlanLocal, int64_t startRow,
     int64_t token0Idx, int64_t token1Idx, int16_t planValue0, int16_t planValue1,
     const RunInfo &runInfo, ConstInfo &constInfo)
 {
-    uint32_t copiedRows = 0;
-    if (token0Idx >= 0) {
-        int64_t selectionTokenOffset = planValue0 > 0 ? GetSelectionTokenOffset(
+    bool valid0 = token0Idx >= 0;
+    bool valid1 = token1Idx >= 0;
+    int64_t selectionOffset0 = -1;
+    int64_t selectionOffset1 = -1;
+    bool hit0 = false;
+    bool hit1 = false;
+    if (valid0) {
+        selectionOffset0 = planValue0 > 0 ? GetSelectionTokenOffset(
             selectionDataRow, static_cast<int32_t>(planValue0) - 1) : -1;
-        if (selectionTokenOffset >= 0) {
-            CopyInSingleSelectionKv(kvInUb, startRow, selectionTokenOffset, constInfo);
+        hit0 = selectionOffset0 >= 0;
+    }
+    if (valid1) {
+        selectionOffset1 = planValue1 > 0 ? GetSelectionTokenOffset(
+            selectionDataRow, static_cast<int32_t>(planValue1) - 1) : -1;
+        hit1 = selectionOffset1 >= 0;
+    }
+    int64_t keyOffset0 = -1;
+    int64_t keyOffset1 = -1;
+    if (valid0 && !hit0) {
+        keyOffset0 = GetkeyOffset(token0Idx, runInfo, constInfo);
+    }
+    if (valid1 && !hit1) {
+        keyOffset1 = GetkeyOffset(token1Idx, runInfo, constInfo);
+    }
+
+    // Optimizations ported from the A3 arch22 kernel (Opt01): issue one paired copy
+    // for two selection hits whose physical slots are contiguous, or for two full-cache
+    // misses whose source rows fit one strided copy (sparseBlockSize == 1). Attention is
+    // a sum over the K/V rows, so swapping the two rows of a pair is safe as long as the
+    // compact plan is swapped with it.
+    if (valid0 && valid1) {
+        if (hit0 && hit1 &&
+            (selectionOffset1 == selectionOffset0 + 1 ||
+             selectionOffset0 == selectionOffset1 + 1)) {
+            bool swap = selectionOffset1 < selectionOffset0;
+            int64_t pairStart = swap ? selectionOffset1 : selectionOffset0;
+            CopyInSelectionKvPair(kvInUb, startRow, pairStart, constInfo);
+            compactPlanLocal.SetValue(startRow, swap ? planValue1 : planValue0);
+            compactPlanLocal.SetValue(startRow + 1, swap ? planValue0 : planValue1);
+            return 2;
+        }
+        if (!hit0 && !hit1 && keyOffset0 >= 0 && keyOffset1 >= 0) {
+            int64_t offsetDiff = keyOffset0 >= keyOffset1 ?
+                keyOffset0 - keyOffset1 : keyOffset1 - keyOffset0;
+            int64_t keySrcStride =
+                (offsetDiff - constInfo.sparseBlockSize) * constInfo.dSizeNope * sizeof(KV_T);
+            int64_t keyRopeSrcStride =
+                (offsetDiff - constInfo.sparseBlockSize) * constInfo.dSizeRope * sizeof(KV_T);
+            if (offsetDiff > 0 && keySrcStride >= 0 && keySrcStride < INT32_MAX &&
+                keyRopeSrcStride < INT32_MAX && constInfo.sparseBlockSize == 1) {
+                bool swap = keyOffset1 < keyOffset0;
+                int64_t baseOffset = swap ? keyOffset1 : keyOffset0;
+                DataCopyExtParams params;
+                params.blockCount = 2;
+                params.srcStride = static_cast<uint32_t>(keySrcStride);
+                params.dstStride = constInfo.dSizeRope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+                DataCopyExtParams ropeParams = params;
+                DataCopyPadExtParams<KV_T> padParams;
+
+                params.blockLen = constInfo.dSizeNope * sizeof(KV_T);
+                DataCopyPad(kvInUb[startRow * dVTemplateTypeInput],
+                    keyGm[baseOffset * constInfo.dSizeNope], params, padParams);
+
+                ropeParams.blockLen = constInfo.dSizeRope * sizeof(KV_T);
+                ropeParams.srcStride = static_cast<uint32_t>(keyRopeSrcStride);
+                ropeParams.dstStride =
+                    constInfo.dSizeNope * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+                DataCopyPad(kvInUb[startRow * dVTemplateTypeInput + constInfo.dSizeNope],
+                    keyRopeGm[baseOffset * constInfo.dSizeRope], ropeParams, padParams);
+
+                // A positive plan value means the planner expected a selection hit;
+                // the slot was not resident, so the loaded row must update it.
+                int16_t update0 = planValue0 > 0 ? static_cast<int16_t>(-planValue0) : planValue0;
+                int16_t update1 = planValue1 > 0 ? static_cast<int16_t>(-planValue1) : planValue1;
+                compactPlanLocal.SetValue(startRow, swap ? update1 : update0);
+                compactPlanLocal.SetValue(startRow + 1, swap ? update0 : update1);
+                return 2;
+            }
+        }
+    }
+
+    // Fallback: one copy per valid token (hit -> selection cache, miss -> full cache).
+    uint32_t copiedRows = 0;
+    if (valid0) {
+        if (hit0) {
+            CopyInSingleSelectionKv(kvInUb, startRow + copiedRows, selectionOffset0, constInfo);
         } else {
-            CopyInSingleKv(kvInUb, startRow, GetkeyOffset(token0Idx, runInfo, constInfo), constInfo);
+            CopyInSingleKv(kvInUb, startRow + copiedRows, keyOffset0, constInfo);
             if (planValue0 > 0) {
                 planValue0 = -planValue0;
             }
@@ -455,14 +570,11 @@ FusedSparseAttentionOverlapVectorService<TEMPLATE_ARGS>::CopyInKvWithExternalPla
         compactPlanLocal.SetValue(startRow + copiedRows, planValue0);
         copiedRows++;
     }
-    if (token1Idx >= 0) {
-        int64_t selectionTokenOffset = planValue1 > 0 ? GetSelectionTokenOffset(
-            selectionDataRow, static_cast<int32_t>(planValue1) - 1) : -1;
-        if (selectionTokenOffset >= 0) {
-            CopyInSingleSelectionKv(kvInUb, startRow + copiedRows, selectionTokenOffset, constInfo);
+    if (valid1) {
+        if (hit1) {
+            CopyInSingleSelectionKv(kvInUb, startRow + copiedRows, selectionOffset1, constInfo);
         } else {
-            CopyInSingleKv(kvInUb, startRow + copiedRows,
-                GetkeyOffset(token1Idx, runInfo, constInfo), constInfo);
+            CopyInSingleKv(kvInUb, startRow + copiedRows, keyOffset1, constInfo);
             if (planValue1 > 0) {
                 planValue1 = -planValue1;
             }
@@ -482,26 +594,61 @@ FusedSparseAttentionOverlapVectorService<TEMPLATE_ARGS>::CopyOutSelectionMisses(
         return;
     }
     DataCopyExtParams kvParams;
-    kvParams.blockCount = 1;
     kvParams.blockLen = constInfo.dSizeNope * sizeof(KV_T);
-    kvParams.srcStride = 0;
+    // Gap between the 512-elem KV slices of adjacent 576-elem UB rows, in 32B units.
+    kvParams.srcStride = (dVTemplateTypeInput - constInfo.dSizeNope) * sizeof(KV_T) /
+        BUFFER_SIZE_BYTE_32B;
     kvParams.dstStride = 0;
-    DataCopyExtParams ropeParams = kvParams;
+    DataCopyExtParams ropeParams;
     ropeParams.blockLen = constInfo.dSizeRope * sizeof(KV_T);
-    for (int64_t row = 0; row < dealRow; ++row) {
+    ropeParams.srcStride = (dVTemplateTypeInput - constInfo.dSizeRope) * sizeof(KV_T) /
+        BUFFER_SIZE_BYTE_32B;
+    ropeParams.dstStride = 0;
+
+    // Only tokens actually loaded from the full cache are written back (Opt02/03/04),
+    // and adjacent destination slots are merged into one copy (Opt01). Runs stop at a
+    // selection block boundary because physical rows may be discontiguous there.
+    int64_t row = 0;
+    while (row < dealRow) {
         int16_t planValue = compactPlanLocal.GetValue(row);
         if (planValue >= 0) {
+            ++row;
             continue;
         }
         int32_t destinationSlot = -static_cast<int32_t>(planValue) - 1;
         int64_t selectionTokenOffset = GetSelectionTokenOffset(selectionRow, destinationSlot);
         if (selectionTokenOffset < 0) {
+            ++row;
             continue;
         }
+        int64_t runLimit = dealRow - row;
+        if (selectionDirectRowStride > 0) {
+            int64_t remaining = selectionDirectRowStride - destinationSlot;
+            if (runLimit > remaining) {
+                runLimit = remaining;
+            }
+        } else if (selectionKvBlockSize > 0) {
+            int64_t remaining = selectionKvBlockSize - destinationSlot % selectionKvBlockSize;
+            if (runLimit > remaining) {
+                runLimit = remaining;
+            }
+        }
+        int64_t runLen = 1;
+        while (runLen < runLimit) {
+            int16_t nextPlanValue = compactPlanLocal.GetValue(row + runLen);
+            if (nextPlanValue >= 0 ||
+                -static_cast<int32_t>(nextPlanValue) - 1 != destinationSlot + runLen) {
+                break;
+            }
+            ++runLen;
+        }
+        kvParams.blockCount = static_cast<uint16_t>(runLen);
+        ropeParams.blockCount = static_cast<uint16_t>(runLen);
         DataCopyPad(selectionKvCacheGm[selectionTokenOffset * constInfo.dSizeNope],
-            kvInUb[row * 576], kvParams);
+            kvInUb[row * dVTemplateTypeInput], kvParams);
         DataCopyPad(selectionKRopeGm[selectionTokenOffset * constInfo.dSizeRope],
-            kvInUb[row * 576 + constInfo.dSizeNope], ropeParams);
+            kvInUb[row * dVTemplateTypeInput + constInfo.dSizeNope], ropeParams);
+        row += runLen;
     }
 }
 
@@ -659,6 +806,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void FusedSparseAttentionOverlapVecto
         commonTBuf.template Get<int16_t>()[SELECTION_PLAN_LOCAL_OFFSET];
     LocalTensor<int16_t> compactPlanLocal =
         commonTBuf.template Get<int16_t>()[SELECTION_COMPACT_PLAN_LOCAL_OFFSET];
+    LocalTensor<uint32_t> packedPlanLocal = selectionPlanLocal.ReinterpretCast<uint32_t>();
     int64_t logicalSelectionRow = -1;
     PrepareExternalSelectionPlan(runInfo, constInfo, selectionPlanLocal, logicalSelectionRow);
     if (sparseCalSize == 0) {
@@ -678,9 +826,27 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void FusedSparseAttentionOverlapVecto
         WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2[pingPong]);
         while (dealRow < Min(16, sparseCalSize) && s2 < sparseS2End) { // Copy 16 rows or stop on -1
             GetRealCmpS2Idx(token0Idx, token1Idx, s2, runInfo, constInfo);
-            int16_t planValue0 = externalSelectionPlanActive ? selectionPlanLocal.GetValue(s2) : 0;
-            int16_t planValue1 = externalSelectionPlanActive && s2 + 1 < runInfo.s2RealSize ?
-                selectionPlanLocal.GetValue(s2 + 1) : 0;
+            // Decode two packed plan values per 32-bit scalar read (A3 Opt01/Phase A).
+            // isSplitG partitions can start at an odd offset, so keep a scalar fallback.
+            // The read at [s2, s2+1] stays inside the s2BaseSize-int16 plan region even
+            // when s2+1 == s2RealSize; that trailing value is discarded just below.
+            int16_t planValue0 = 0;
+            int16_t planValue1 = 0;
+            if (externalSelectionPlanActive) {
+                if ((s2 & 1) == 0) {
+                    uint32_t packedPlanValue =
+                        packedPlanLocal.GetValue(static_cast<uint32_t>(s2 >> 1));
+                    planValue0 = static_cast<int16_t>(packedPlanValue & 0xFFFFU);
+                    planValue1 = static_cast<int16_t>(packedPlanValue >> 16);
+                    if (s2 + 1 >= runInfo.s2RealSize) {
+                        planValue1 = 0;
+                    }
+                } else {
+                    planValue0 = selectionPlanLocal.GetValue(s2);
+                    planValue1 = s2 + 1 < runInfo.s2RealSize ?
+                        selectionPlanLocal.GetValue(s2 + 1) : 0;
+                }
+            }
             s2 += 2; // Copy two rows per iteration
             if (token0Idx == -1 && token1Idx == -1) {
                 meetEnd = true;
