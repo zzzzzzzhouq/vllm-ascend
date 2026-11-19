@@ -129,7 +129,8 @@ bash per_test/run.sh perf seq           # seqlen 曲线 @80%（5 档 msl，SEQ_L
 ```
 
 矩阵可用环境变量覆盖：`RATIOS_MAIN`/`RATIOS_AA`（命中率点与 A/A 标签）、
-`AA_LABELS=0`（关 A/A，省一半时间但失去显著性门槛）、`BS_LIST`、`SEQ_LENS`。
+`AA_LABELS=0`（关 A/A，省一半时间但失去显著性门槛）、`BS_LIST`、`SEQ_LENS`、
+`DRAM_GB`（MemFabric 池大小；宿主大页映射失败时先试 `DRAM_GB=1`）。
 
 也可以直接调底层脚本（两者等价，脚本自己定位目录）：
 
