@@ -57,7 +57,10 @@ def main():
     slots = int(_arg("--topk-buffer-size", "0") or topk)
     layout = _arg("--hit-layout", "prefix").split(",")[0]
 
-    dev = int(os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0") or 0)
+    # ASCEND_RT_VISIBLE_DEVICES may be a list ("0,1,2,..."); fake bench only
+    # needs one id for its deterministic bias, so take the first entry.
+    _visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0") or "0"
+    dev = int(_visible.split(",")[0].strip())
     spread = float(os.environ.get("FAKE_DEV_SPREAD", "0.1"))
     fail = os.environ.get("FAKE_FAIL", "") == "1"
     # 并行时每个进程绑不同的卡；串行时全是同一张。用卡号造一点偏置，
