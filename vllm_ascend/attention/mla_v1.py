@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -75,6 +75,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -97,6 +98,7 @@ BUILD_METADATA_STEP_DECODE = 1
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -157,6 +159,64 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
+        """Publish the complete cache demand using the selected execution format."""
+        spec = super().get_kv_cache_spec(vllm_config)
+        if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            return spec
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        storage_heads = self.num_heads
+        if model_type == "kimi_linear":
+            # Preserve the existing Kimi Linear cache head-count contract.
+            storage_heads = spec.num_heads
+        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+
+        # Preserve upstream metadata and apply all owner fields together.
+        # Reuse the physical packing selected by the execution implementation.
+        values.update(
+            num_heads=storage_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+            cache_sparse_sfa_turboquant=use_sfa_turboquant,
+            cache_sparse_sfa_c8=use_sfa_c8,
+            store_on_host=(
+                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
+            ),
+            head_size=head_size,
+            dtype=dtype,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return AscendMLAAttentionSpec(**values)
+
+    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
+        """Resolve cache dimensions, dtype and SFA flags from the execution format."""
+        # Keep TurboQuant's existing precedence when both SFA switches are set.
+        use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
+        use_sfa_c8 = not use_sfa_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
+        use_packed_sfa = use_sfa_turboquant or use_sfa_c8
+        use_fa_quant = getattr(self.impl, "fa_quant_layer", False)
+        head_size = spec.head_size
+        dtype = spec.dtype
+        cache_dtype_str = spec.cache_dtype_str
+        if use_packed_sfa:
+            head_size = self.impl.sfa_qsfa_packed_kv_head_dim
+            cache_dtype_str = self.impl.kv_cache_dtype
+            if use_sfa_turboquant:
+                dtype = torch.int8
+            else:
+                dtype = self.impl.c8_cache_dtype
+        elif use_fa_quant:
+            # FA quantization is selected per layer. The backend class hook
+            # must not reselect it from global configuration.
+            head_size = self.impl.head_size + self.qk_rope_head_dim
+            dtype = self.impl.dtype
+            cache_dtype_str = None
+
+        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8
 
 
 @dataclass
@@ -971,6 +1031,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         fused_output_sizes = getattr(self.fused_qkv_a_proj, "output_sizes", None)
         self.qkv_a_gate_fused = fused_output_sizes is not None and len(fused_output_sizes) == 3
         self.use_output_gate = self.g_proj is not None or self.qkv_a_gate_fused
+        if self.g_proj is not None:
+            register_flash_attention_gate_warmup(self.vllm_config.model_config.dtype, self.num_heads * self.v_head_dim)
+        if self.qkv_a_gate_fused:
+            register_flash_attention_gate_warmup(
+                self.vllm_config.model_config.dtype,
+                self.num_heads * self.v_head_dim,
+                gate_prefix=self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+            )
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -988,6 +1056,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
+        # Replicated MLA layers use ordinary, non-interleaved KV.
+        if not self.use_pcp and not self.use_dcp:
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -1311,7 +1382,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self._flashmla_writer_buffers is not None:
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
-        block_size = self.vllm_config.cache_config.block_size
+        # PROLOG_V3 limits blockSize to 1024. FlashMLA history pages can be
+        # larger (e.g. 1536), but this private writer is scattered by slot.
+        block_size = min(self.vllm_config.cache_config.block_size, PROLOG_V3_MAX_BLOCK_SIZE)
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
@@ -3451,7 +3524,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
-            o_proj_input.mul_(torch.sigmoid(gate))
+            flash_attention_gate(o_proj_input, gate)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

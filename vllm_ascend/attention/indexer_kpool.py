@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from importlib import import_module
@@ -20,6 +21,7 @@ from vllm.distributed import (
     get_tp_group,
 )
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -37,6 +39,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.utils import all_gather_async
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -643,7 +646,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
                 f"AscendIndexerKPoolTailSpec, got {type(kv_cache_spec).__name__}."
             )
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.block_size = kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.ring_capacity
         # Persistent rings are separate from temporary CANN state pages.
         self._max_num_metadata_reqs = max(
             vllm_config.scheduler_config.max_num_seqs, vllm_config.scheduler_config.max_num_batched_tokens
@@ -746,7 +749,8 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        # Ring capacity is independent of the pool size and SFA C128.
+        # Kernel selection uses the logical pool size. The builder addresses
+        # the entire physical ring through spec.ring_capacity.
         return [MultipleOf(1)]
 
     @staticmethod
@@ -774,6 +778,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     The cache-only backends above own the engine-facing attention contracts.
     Keep execution independent of the standard SFA indexer and its operators.
     """
+
+    _head_weight_f32: torch.Tensor | None
 
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
@@ -825,14 +831,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         ):
             raise NotImplementedError("GLM KPool FP8 LI requires CANN PoolKeyIndexer FP8 support on Ascend 950.")
         self._init_cann_ops()
-        for name in (
-            "_key_weight",
-            "_gate_weight",
-            "_head_weight_f32",
-            "_norm_weight_f32",
-            "_norm_bias_f32",
-        ):
-            self.register_buffer(name, None, persistent=False)
+        self._head_weight_f32 = None
 
     @property
     def topk_output_width(self) -> int:
@@ -852,11 +851,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 2 if self.enable_sparse_li_c8 else 1
 
     def process_weights_after_loading(self) -> None:
-        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
-        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
-        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
-        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
-        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+        """Refill the sole derived weight without moving its captured address."""
+        head_weight = (
+            self.wk_weights_proj.weight[self.head_dim :].detach().to(dtype=torch.float32, copy=True).contiguous()
+        )
+        # TODO: Use upstream refill_derived once all vLLM versions supported
+        # by vllm-ascend main provide it.
+        if self._head_weight_f32 is None:
+            self._head_weight_f32 = head_weight
+        else:
+            self._head_weight_f32.copy_(head_weight)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:
@@ -875,11 +879,39 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError("GLM KPool cache requires a key tensor and, for FP8, one scale tensor.")
         return tuple(cache)
 
+    def prepare_pcp_hidden(
+        self, k_hidden_states: torch.Tensor, indexer_metadata: AscendIndexerKPoolMetadata
+    ) -> torch.Tensor | Callable[[], torch.Tensor]:
+        """Launch KPool PCP inputs before the independent MLA/indexer queries."""
+        restore_indices = indexer_metadata.pcp_hidden_restore_indices
+        if restore_indices is None:
+            return k_hidden_states
+        num_tokens = k_hidden_states.shape[0]
+        # SFA already selects the query rows; keep the same rows for keys.
+        k_hidden = k_hidden_states[:num_tokens]
+        padding = indexer_metadata.pcp_local_token_count - num_tokens
+        if padding < 0:
+            raise ValueError("KPool PCP keys exceed the rank-local padded token count.")
+        if padding:
+            k_hidden = F.pad(k_hidden, (0, 0, 0, padding))
+        k_hidden = k_hidden.contiguous()
+        gathered_hidden, handle = all_gather_async(k_hidden, get_pcp_group())
+        logger.info_once("KPool PCP hidden AllGather overlaps query projections.")
+
+        def finish() -> torch.Tensor:
+            # Retain the contiguous send until HCCL has finished reading it.
+            _ = k_hidden
+            if handle is not None:
+                handle.wait()
+            return torch.index_select(gathered_hidden, 0, restore_indices)
+
+        return finish
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor,
+        k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: Any,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
@@ -893,12 +925,13 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError("GLM KPool backend requires tail-cache metadata.")
 
         # SFA owns token trimming, including padded PCP and graph query rows.
+        if isinstance(k_hidden_states, torch.Tensor):
+            k_hidden_states = self.prepare_pcp_hidden(k_hidden_states, indexer_metadata)
         num_tokens = hidden_states.shape[0]
         hidden = hidden_states[:num_tokens]
-        k_hidden = k_hidden_states[:num_tokens]
-        if self._key_weight is None:
+        if self._head_weight_f32 is None:
             self.process_weights_after_loading()
-        assert self._key_weight is not None
+        assert self._head_weight_f32 is not None
         q_values = None
         weights = None
         if compute_topk:
@@ -917,15 +950,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
         (tail_cache,) = self._bound_caches(self.tail_cache)
-        restore_indices = indexer_metadata.pcp_hidden_restore_indices
-        if restore_indices is not None:
-            padding = indexer_metadata.pcp_local_token_count - k_hidden.shape[0]
-            if padding < 0:
-                raise ValueError("KPool PCP keys exceed the rank-local padded token count.")
-            if padding:
-                k_hidden = F.pad(k_hidden, (0, 0, 0, padding))
-            gathered_hidden = get_pcp_group().all_gather(k_hidden.contiguous(), dim=0)
-            k_hidden = torch.index_select(gathered_hidden, 0, restore_indices)
+        k_hidden = k_hidden_states[:num_tokens] if isinstance(k_hidden_states, torch.Tensor) else k_hidden_states()
         return self._forward_cann(
             k_hidden,
             q_values,
@@ -1032,18 +1057,23 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         # Keep history separate: CANN can save the tail before other cores
         # finish reading history. Whole-pool shifts preserve the pooling result.
+        # Read parameters at execution time so refits/offloading cannot leave
+        # persistent views pointing at replaced parameter storage.
+        key_weight = self.wk_weights_proj.weight[: self.head_dim]
+        gate_weight = self.index_kpool_compress_gate
+        norm_weight, norm_bias = self.k_norm.weight, self.k_norm.bias
         norm_eps = getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6))
         state = self._prepare_keypool_state(tail_cache, cache_metadata.start_pos, tail_metadata, self.index_kpool)
         pooled_key = self._key_pool(
             hidden_states,
-            self._key_weight,
-            self._gate_weight,
+            key_weight,
+            gate_weight,
             self.index_kpool_compress_ape,
             state,
             cache_metadata.keypool_state_table,
             cache_metadata.keypool_start_offsets,
-            norm_weight=self._norm_weight_f32,
-            norm_bias=self._norm_bias_f32,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             cu_seqlens=cache_metadata.query_start_loc,
             cmp_ratio=self.index_kpool,
             norm_eps=norm_eps,
@@ -1052,12 +1082,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if tail_metadata.cann_inputs.retained_indices is not None:
             # Re-project the live MTP rollback window missing from CANN state.
             tail_hidden = self._gather_retained_hidden(hidden_states, tail_metadata.cann_inputs.retained_indices)
-            tail_key = F.linear(tail_hidden, self._key_weight).float()
-            if self._norm_weight_f32 is not None:
-                tail_key = F.layer_norm(
-                    tail_key, (self.head_dim,), self._norm_weight_f32, self._norm_bias_f32, norm_eps
-                )
-            tail_gate = F.linear(tail_hidden, self._gate_weight).float()
+            tail_key = F.linear(tail_hidden, key_weight).float()
+            if norm_weight is not None:
+                tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
+            tail_gate = F.linear(tail_hidden, gate_weight).float()
         self._write_keypool_caches(
             tail_cache,
             indexer_cache,
