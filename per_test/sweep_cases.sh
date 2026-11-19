@@ -107,6 +107,12 @@ COMMON_TAIL="$COMMON_TAIL --hit-layout strided"
 #   （宿主上 MemFabric/HYBM 起不来时用，见 README 的排障节）
 CPU_KV_BACKEND="${DSA_CPU_KV_BACKEND:-offload}"
 COMMON_TAIL="$COMMON_TAIL --cpu-kv-backend $CPU_KV_BACKEND"
+# 可选：显式指定 MemFabric 池大小（GiB）。不设时由 bench 按 msl 自动算
+# （64K -> 1.5 GiB，对齐到 2 GiB；若宿主大页映射失败，先试 DRAM_GB=1）。
+if [ -n "${DRAM_GB:-}" ]; then
+    COMMON_TAIL="$COMMON_TAIL --dram-size-gb $DRAM_GB"
+    echo "MemFabric 池大小: ${DRAM_GB} GiB（DRAM_GB 覆盖）"
+fi
 COMMON="--max-seq-len 65536 $COMMON_TAIL"
 echo "CPU KV 后端: $CPU_KV_BACKEND（基线与优化两臂必须用同一个值）"
 PLANS="--plan-slots ${PLAN_AXIS:-off,scattered}"
