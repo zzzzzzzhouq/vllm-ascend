@@ -212,9 +212,16 @@ def offload_pool():
     if hasattr(config, "scene"):
         config.scene = offload.Scene.LOCAL
     try:
-        offload.initialize(config)
+        ret = offload.initialize(config)
     except Exception as exc:  # pragma: no cover - environment dependent
         pytest.skip(f"MemFabric offload unavailable: {type(exc).__name__}: {exc}")
+    if ret != 0:  # pragma: no cover - environment dependent
+        try:
+            from memfabric_hybrid import get_last_err_msg
+            detail = get_last_err_msg()
+        except Exception:
+            detail = "<no detail>"
+        pytest.skip(f"MemFabric offload unavailable: initialize returned {ret}: {detail}")
     try:
         yield
     finally:
