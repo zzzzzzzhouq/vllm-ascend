@@ -252,6 +252,33 @@ DSA_CPU_KV_BACKEND=swap_memory bash per_test/run.sh perf hit
 
 ⚠ A/B 成立的前提：基线与优化两臂用**同一个** `DSA_CPU_KV_BACKEND`。
 
+### 7.2 A5 没有配置大页时
+
+A5 上默认的 LOCAL + MTE 路径走 MemFabric VMM segment，强制 2M 大页；
+`HugePages_Total=0` 时 `offload.initialize` 返回 -1，日志是
+`Map mem failed:-6`（-6 = `DRV_ERROR_OUT_OF_MEMORY`）。两种处理：
+
+1. **推荐：配大页**（和宿主内存池大小一致，1 GiB 池 = 512 个 2M 页）：
+
+   ```bash
+   echo 1024 > /proc/sys/vm/nr_hugepages
+   echo 2048 > /proc/sys/vm/nr_overcommit_hugepages
+   grep -iE "HugePages_Total|HugePages_Free" /proc/meminfo
+   ```
+
+2. **不配大页：走 A5 兼容路径**
+
+   ```bash
+   DSA_OFFLOAD_GIANT_PAGE=1 DRAM_GB=1 bash per_test/run.sh perf hit
+   ```
+
+   这个开关设置 `OffloadConfig.flags = OFFLOAD_FLAG_GIANT_PAGE`，
+   在 A5 上切到 `HybmConnBasedSegment`（`HalMemAlloc` 普通页），
+   `env.sh` 同时自动带上 `MF_HYBM_ENABLE_4K_PAGE=1`。
+
+   ⚠ 这是 MemFabric 针对 A5 无 1G 大页的临时兼容路径；A/B 两臂必须
+   用同一个设置，不要一边开一边不开。
+
 ## 8. 与原仓库（poolingDSA）的差别
 
 - 环境准备换成 vllm-ascend 上游的 `setup.py build_aclnn` vendor 包流程；

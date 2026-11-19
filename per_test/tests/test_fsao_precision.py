@@ -211,6 +211,8 @@ def offload_pool():
             setattr(config, name, value)
     if hasattr(config, "scene"):
         config.scene = offload.Scene.LOCAL
+    if os.environ.get("DSA_OFFLOAD_GIANT_PAGE", "0") == "1" and hasattr(offload, "OFFLOAD_FLAG_GIANT_PAGE"):
+        config.flags = offload.OFFLOAD_FLAG_GIANT_PAGE
     try:
         ret = offload.initialize(config)
     except Exception as exc:  # pragma: no cover - environment dependent
