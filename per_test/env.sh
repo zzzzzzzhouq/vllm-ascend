@@ -159,6 +159,15 @@ case "$_dsa_mf_state" in
         ;;
 esac
 
+# 4.1) A5 没有大页时的兜底：OFFLOAD_FLAG_GIANT_PAGE 让 LOCAL+MTE 在 A5 上
+#      走 HybmConnBasedSegment（HalMemAlloc 普通页），再配 4K page 开关走
+#      普通 mmap；否则默认 VMM 路径强制 2M 大页，HugePages_Total=0 时
+#      HalMemMap 返回 -6 (DRV_ERROR_OUT_OF_MEMORY)。
+if [ "${DSA_OFFLOAD_GIANT_PAGE:-0}" = "1" ]; then
+    export MF_HYBM_ENABLE_4K_PAGE="${MF_HYBM_ENABLE_4K_PAGE:-1}"
+    echo "[env.sh] DSA_OFFLOAD_GIANT_PAGE=1 -> A5 conn-based + 4K 页（MF_HYBM_ENABLE_4K_PAGE=$MF_HYBM_ENABLE_4K_PAGE）"
+fi
+
 # 5) PYTHONPATH 仓库前置（yq 原版第 143 行，去容器化时同样误删）。
 #    按解析后的真实路径去重：同仓库多路径/符号链接只留第一次出现的写法，
 #    重复 source 不堆叠。

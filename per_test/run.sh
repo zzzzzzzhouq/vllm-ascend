@@ -41,6 +41,7 @@ usage() {
 常用覆盖：
   DEVICES=0,1,2,3 PROCS=3 bash per_test/run.sh perf hit
   DRAM_GB=1 bash per_test/run.sh perf hit           # MemFabric 池大小（GiB）
+  DSA_OFFLOAD_GIANT_PAGE=1 DRAM_GB=1 bash per_test/run.sh perf hit  # A5 无大页兜底
   SMOKE=1 bash per_test/run.sh perf hit             # 假 bench 空跑，不碰 NPU
   DSA_CPU_KV_BACKEND=swap_memory bash per_test/run.sh precision
   DSA_REPO=/别的/clone bash per_test/run.sh env
