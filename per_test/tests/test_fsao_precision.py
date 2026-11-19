@@ -199,12 +199,18 @@ def offload_pool():
         print(f"CPU_KV_BACKEND={_CPU_KV_BACKEND}: skip MemFabric pool init", flush=True)
         yield
         return
+    # MemFabric >= 1.3: ``size`` 拆成 reserve_size（预留地址空间）和
+    # alloc_size（本 rank 实际分配）。单进程用例里两者都等于池大小。
+    pool_bytes = int(_DRAM_POOL_GB * _GIB)
     config = offload.OffloadConfig()
     config.device_id = torch_npu.npu.current_device()
-    config.size = int(_DRAM_POOL_GB * _GIB)
+    config.reserve_size = pool_bytes
+    config.alloc_size = pool_bytes
     for name, value in (("world_size", 1), ("rank_id", 0)):
         if hasattr(config, name):
             setattr(config, name, value)
+    if hasattr(config, "scene"):
+        config.scene = offload.Scene.LOCAL
     try:
         offload.initialize(config)
     except Exception as exc:  # pragma: no cover - environment dependent
