@@ -159,14 +159,29 @@ case "$_dsa_mf_state" in
         ;;
 esac
 
-# 4.1) A5 没有大页时的兜底：OFFLOAD_FLAG_GIANT_PAGE 让 LOCAL+MTE 在 A5 上
-#      走 HybmConnBasedSegment（HalMemAlloc 普通页），再配 4K page 开关走
-#      普通 mmap；否则默认 VMM 路径强制 2M 大页，HugePages_Total=0 时
-#      HalMemMap 返回 -6 (DRV_ERROR_OUT_OF_MEMORY)。
-if [ "${DSA_OFFLOAD_GIANT_PAGE:-0}" = "1" ]; then
-    export MF_HYBM_ENABLE_4K_PAGE="${MF_HYBM_ENABLE_4K_PAGE:-1}"
-    echo "[env.sh] DSA_OFFLOAD_GIANT_PAGE=1 -> A5 conn-based + 4K 页（MF_HYBM_ENABLE_4K_PAGE=$MF_HYBM_ENABLE_4K_PAGE）"
-fi
+# 4.1) 平台相关的 offload 兜底（按 SOC 区分，别互相串）：
+#   A5（950）：DSA_OFFLOAD_GIANT_PAGE=1 让 LOCAL+MTE 走 HybmConnBasedSegment
+#       （HalMemAlloc 普通页），再配 MF_HYBM_ENABLE_4K_PAGE=1 走普通 mmap；
+#       否则默认 VMM 路径强制 2M 大页，HugePages_Total=0 时 HalMemMap
+#       返回 -6 (DRV_ERROR_OUT_OF_MEMORY)。
+#   A3（910_93）：不要开这个 flag——它会把路径改成 VMM + 1G 大页；这里直接
+#       忽略并提示，A3 继续用默认 VMM + 2M。
+case "${SOC_VERSION:-}" in
+    *950*)
+        if [ "${DSA_OFFLOAD_GIANT_PAGE:-0}" = "1" ]; then
+            export MF_HYBM_ENABLE_4K_PAGE="${MF_HYBM_ENABLE_4K_PAGE:-1}"
+            echo "[env.sh] 平台 A5：DSA_OFFLOAD_GIANT_PAGE=1 -> conn-based + 4K 页（MF_HYBM_ENABLE_4K_PAGE=$MF_HYBM_ENABLE_4K_PAGE）"
+        fi
+        ;;
+    *)
+        if [ "${DSA_OFFLOAD_GIANT_PAGE:-0}" = "1" ]; then
+            export DSA_OFFLOAD_GIANT_PAGE=0
+            echo "[env.sh] ⚠ DSA_OFFLOAD_GIANT_PAGE=1 只适用于 A5（当前 SOC=${SOC_VERSION:-<未设置>}），已忽略。"
+            echo "[env.sh]   A3 默认走 VMM+2M 大页；若 offload.initialize 报 -6，配大页："
+            echo "[env.sh]   echo 512 > /proc/sys/vm/nr_hugepages   # 1 GiB 池"
+        fi
+        ;;
+esac
 
 # 5) PYTHONPATH 仓库前置（yq 原版第 143 行，去容器化时同样误删）。
 #    按解析后的真实路径去重：同仓库多路径/符号链接只留第一次出现的写法，

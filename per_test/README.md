@@ -279,6 +279,10 @@ A5 上默认的 LOCAL + MTE 路径走 MemFabric VMM segment，强制 2M 大页�
    ⚠ 这是 MemFabric 针对 A5 无 1G 大页的临时兼容路径；A/B 两臂必须
    用同一个设置，不要一边开一边不开。
 
+   ⚠ **A3 不要开 `DSA_OFFLOAD_GIANT_PAGE`**：在 A3 上它会把 offload 路径改成
+   VMM + 1G 大页，不是 A5 的 conn-based 兜底。`env.sh` 检测到 SOC 不是 950
+   时会自动忽略并打印提示；A3 继续用默认的 VMM + 2M 大页即可。
+
 ## 8. 与原仓库（poolingDSA）的差别
 
 - 环境准备换成 vllm-ascend 上游的 `setup.py build_aclnn` vendor 包流程；
