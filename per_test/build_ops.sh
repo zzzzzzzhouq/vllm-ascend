@@ -42,7 +42,7 @@ if [ -z "${SOC_VERSION:-}" ]; then
         _dsa_npu="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/NPU Name/{print $2; exit}')"
     fi
     case "${_dsa_chip,,}" in
-        *910*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
+        *910*|*950*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
     esac
     if [ -n "${SOC_VERSION:-}" ]; then
         echo "SOC_VERSION 未导出，已从 npu-smi 识别为 $SOC_VERSION"
