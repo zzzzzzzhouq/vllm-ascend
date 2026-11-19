@@ -255,8 +255,9 @@ DSA_CPU_KV_BACKEND=swap_memory bash per_test/run.sh perf hit
 
 - 环境准备换成 vllm-ascend 上游的 `setup.py build_aclnn` vendor 包流程；
   `env.sh`/`build_ops.sh` 是原仓库同名脚本的去容器化改写（写死的容器路径、
-  memfabric/atb 段去掉，SOC_VERSION 兜底补 ascend910_93，编译入口换成
-  build_aclnn + build_ext 两步）。
+  atb 段去掉；memfabric 1.3+ 的 wheel 自带 `libmf_*.so`，`env.sh` 直接
+  import 自检，不再依赖 `set_env.sh`；SOC_VERSION 兜底补 ascend910_93，
+  编译入口换成 build_aclnn + build_ext 两步）。
 - 入口改成 `per_test/run.sh`：路径全部按 `BASH_SOURCE` 解析，目录可改名/整体
   搬动，不再依赖 `yq_files` 这个名字，也不需要手动 source 环境。
 - 精度门禁只用 `per_test/tests/test_fsao_precision.py`（fp32 golden，101 用例）；
