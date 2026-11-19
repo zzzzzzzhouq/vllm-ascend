@@ -227,6 +227,11 @@ def init_offload_pool(
     config.world_size = world_size
     config.rank_id = rank_id
     config.scene = offload.Scene.LOCAL
+    # A5 without a huge-page pool: OFFLOAD_FLAG_GIANT_PAGE routes LOCAL+MTE
+    # through HybmConnBasedSegment, which uses normal pages on 950 (together
+    # with MF_HYBM_ENABLE_4K_PAGE=1, set by env.sh).
+    if os.environ.get("DSA_OFFLOAD_GIANT_PAGE", "0") == "1":
+        config.flags = offload.OFFLOAD_FLAG_GIANT_PAGE
     print(
         "OFFLOAD_INIT device_id={} size_gb={} reserve_bytes={} alloc_bytes={} "
         "world_size={} rank_id={} scene=LOCAL".format(
