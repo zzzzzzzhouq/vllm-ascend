@@ -240,13 +240,23 @@ def init_offload_pool(
         flush=True,
     )
     try:
-        offload.initialize(config)
+        ret = offload.initialize(config)
     except Exception as exc:
         raise RuntimeError(
             f"offload.initialize failed for {dram_size_gb} GiB pool: "
             f"{type(exc).__name__}: {exc}. Host may lack free/locked memory for "
             "MemFabric pinned pool; try smaller --dram-size-gb or free host RAM."
         ) from exc
+    if ret != 0:
+        try:
+            from memfabric_hybrid import get_last_err_msg
+            detail = get_last_err_msg()
+        except Exception:
+            detail = "<no detail>"
+        raise RuntimeError(
+            f"offload.initialize returned {ret} for {dram_size_gb} GiB pool: {detail}. "
+            "Check `mfcli kernel info` (A5 acc_offload kernel installed?) and host memory."
+        )
 
 
 def uninit_offload_pool() -> None:
