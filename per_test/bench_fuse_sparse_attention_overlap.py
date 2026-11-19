@@ -211,15 +211,31 @@ def init_offload_pool(
     world_size: int = 1,
     rank_id: int = 0,
 ) -> None:
-    """Mirror kv_offload_decode_manager MemFabric OffloadConfig initialize."""
+    """Mirror SparseKVOffloadManager MemFabric OffloadConfig initialize.
+
+    MemFabric >= 1.3 replaced ``config.size`` with two fields:
+    ``reserve_size`` (address space reserved for this rank) and
+    ``alloc_size`` (bytes actually allocated by this rank). The production
+    manager reserves on every TP rank but only rank 0 allocates; this bench
+    runs one process, so both are the full pool size.
+    """
+    pool_bytes = int(dram_size_gb * _GIB)
     config = offload.OffloadConfig()
     config.device_id = torch_npu.npu.current_device()
-    config.size = int(dram_size_gb * _GIB)
+    config.reserve_size = pool_bytes
+    config.alloc_size = pool_bytes if rank_id == 0 else 0
     config.world_size = world_size
     config.rank_id = rank_id
+    config.scene = offload.Scene.LOCAL
     print(
-        "OFFLOAD_INIT device_id={} size_gb={} world_size={} rank_id={}".format(
-            config.device_id, dram_size_gb, world_size, rank_id
+        "OFFLOAD_INIT device_id={} size_gb={} reserve_bytes={} alloc_bytes={} "
+        "world_size={} rank_id={} scene=LOCAL".format(
+            config.device_id,
+            dram_size_gb,
+            config.reserve_size,
+            config.alloc_size,
+            world_size,
+            rank_id,
         ),
         flush=True,
     )
@@ -1953,8 +1969,9 @@ def parse_args():
         "--dram-size-gb",
         type=float,
         default=None,
-        help="Only for --cpu-kv-backend=offload: MemFabric OffloadConfig.size in GB "
-        "(same as kv_offload_decode_config.dram_size_per_dp_GB). "
+        help="Only for --cpu-kv-backend=offload: MemFabric OffloadConfig "
+        "reserve_size/alloc_size in GB (same as "
+        "kv_offload_decode_config.dram_size_per_dp_GB). "
         "Default: auto from --max-seq-len (1M -> ~2GiB).",
     )
     parser.add_argument(
