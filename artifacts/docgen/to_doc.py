@@ -10,7 +10,9 @@ DOCX = HERE / "FusedSparseAttentionOverlap算子接入指导.docx"
 DOC = HERE / "FusedSparseAttentionOverlap算子接入指导.doc"
 PDF = HERE / "preview.pdf"
 
-word = win32.gencache.EnsureDispatch("Word.Application")
+# Late binding avoids a corrupted win32com gen_py cache (EnsureDispatch can
+# fail with "module ... has no attribute 'CLSIDToClassMap'").
+word = win32.Dispatch("Word.Application")
 word.Visible = False
 word.DisplayAlerts = 0
 

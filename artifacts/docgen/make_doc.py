@@ -573,9 +573,8 @@ def chapter2(doc: Doc):
         "其他依赖",
         ["依赖", "来源", "用途"],
         [
-            ["fla_npu", "当前分支要求的 aarch64 wheel", "pytest conftest 需要"],
             ["modelscope", "单独安装，`<1.38`", "conftest 需要；测试不下载模型"],
-            ["pytest", "单独安装", "运行仓内单算子用例"],
+            ["pytest", "单独安装", "运行 `per_test` 单算子精度用例"],
             ["setuptools-rust / ninja / pybind11", "pip 可安装的最新版本", "编译扩展与算子包"],
             ["ais-bench-benchmark + pandas", "独立 venv 安装", "整网压测（可选）"],
         ],
@@ -810,12 +809,16 @@ PY
     doc.p("检查点：输出 `算子加载成功`。到这一步，编译和安装就完成了。")
 
 
-def chapter4(doc: Doc):
-    doc.set_chapter(4)
+def chapter6_service(doc: Doc):
+    doc.set_chapter(6)
     doc.page_break()
-    doc.h1("四、启动推理服务")
+    doc.h1("六、接入指导：启动推理服务")
 
-    doc.h2("4.1 能接哪些模型")
+    doc.p(
+        "单算子精度和性能都通过后，再做整网接入。本章只调整部署参数，不再改算子二进制。"
+    )
+
+    doc.h2("6.1 能接哪些模型")
     doc.p("只有带 Indexer 的稀疏注意力模型才走这条路径，落地时要同时满足模型结构和 KV 缓存两方面的条件：")
     doc.bullets([
         "权重 config 里有 `index_topk`，没有 `compress_ratios`。GLM-5.x 属于这一类；DeepSeek-V4 系列带 CSA2 "
@@ -839,7 +842,7 @@ def chapter4(doc: Doc):
         first_col_bold=True,
     )
 
-    doc.h2("4.2 启动服务")
+    doc.h2("6.2 启动服务")
     doc.p(
         "先准备好模型权重（本文用 GLM-5.1-w4a8，约 391GB），把 `MODEL_PATH` 指到权重目录。网卡名和 IP 用"
         "下面第一条命令查，挑一个不是 127.0.0.1 的，第二列就是网卡名。服务参数按 16 卡、TP16 写的。"
@@ -898,9 +901,9 @@ curl -s http://127.0.0.1:8000/health; echo
 """,
         "检查服务是否就绪",
     )
-    doc.p("检查点：返回 `{\"status\":\"ok\"}`，或者直接进入 4.3 发一条请求看结果。")
+    doc.p("检查点：返回 `{\"status\":\"ok\"}`，或者直接进入 6.3 发一条请求看结果。")
 
-    doc.h2("4.3 发一个请求")
+    doc.h2("6.3 发一个请求")
     doc.code(
         r"""
 curl -s http://127.0.0.1:8000/v1/chat/completions \
@@ -914,14 +917,14 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
     )
 
 
-def chapter5(doc: Doc):
-    doc.set_chapter(5)
+def chapter7_verify(doc: Doc):
+    doc.set_chapter(7)
     doc.page_break()
-    doc.h1("五、验证算子确实生效")
+    doc.h1("七、验证算子确实生效")
 
-    doc.p("进程不崩、请求能回，不代表走的是这个算子。下面三件事按顺序确认。")
+    doc.p("进程不崩、请求能回，不代表走的是这个算子。下面两件事按顺序确认。")
 
-    doc.h2("5.1 看指标")
+    doc.h2("7.1 看指标")
     doc.code(
         r"""
 curl -s http://127.0.0.1:8000/metrics | grep prefix_cache | head
@@ -930,31 +933,12 @@ curl -s http://127.0.0.1:8000/metrics | grep prefix_cache | head
     )
     doc.p("检查点：能查到 `vllm:prefix_cache_*`，说明 sparse offload 路径整体生效。")
 
-    doc.h2("5.2 跑单算子精度测试")
-    doc.p(
-        "测试用例依赖 FLA（`fla_npu`）。如果环境里没有，按仓库要求从 "
-        "https://github.com/flashserve/flash-linear-attention-npu/releases 下载 aarch64 wheel 后安装；"
-        "这一步只影响精度测试，不影响上面的推理服务。"
-    )
-    doc.code(
-        r"""
-cd vllm-ascend
-source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
-export ASCEND_RT_VISIBLE_DEVICES=0
-
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py
-""",
-        "运行仓内精度用例",
-    )
-    doc.p("检查点：最后一行是 `4 passed`。")
-
-    doc.h2("5.3 验证清单")
+    doc.h2("7.2 验证清单")
     doc.table(
         "结构验证清单",
         ["层次", "验证项", "通过标准"],
         [
             ["编译", "算子注册", "`hasattr(torch.ops._C_ascend, \"npu_fused_sparse_attention_overlap\")` 为 True"],
-            ["单算子", "仓内精度用例", "`4 passed`"],
             ["单算子", "状态正确性", "`status[topk] == topk`，Cache 与 Gather 结果一致"],
             ["整网", "服务可用", "`/health` 200，对话请求正常返回"],
             ["整网", "路径生效", "`/metrics` 有 `vllm:prefix_cache_*`"],
@@ -965,10 +949,384 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_at
     )
 
 
+def chapter4_precision(doc: Doc):
+    doc.set_chapter(4)
+    doc.page_break()
+    doc.h1("四、单算子精度测试")
+
+    doc.p(
+        "单算子编译通过后，先过精度门禁，再进入性能测试。性能只回答“快不快”，"
+        "不回答“对不对”；精度挂了，性能数据直接作废。"
+    )
+
+    doc.h2("4.1 运行精度门禁")
+    doc.p(
+        "`per_test` 自带小内存精度用例，不需要额外测试依赖，也不依赖整网服务。"
+        "它会覆盖内部 planner 和外部计划（LRU）两条路，以及 miss / hit 两种状态。"
+    )
+    doc.code(
+        r"""
+cd vllm-ascend
+DSA_CPU_KV_BACKEND=offload bash per_test/run.sh precision
+""",
+        "单算子精度门禁",
+    )
+    doc.p(
+        "检查点：最后一行是 `74 passed, 27 deselected, 0 failed`（A3 小内存预设）；"
+        "出现 failed 先停下，不要继续性能测试。"
+    )
+
+    doc.h2("4.2 官方精度用例（可选补充）")
+    doc.p(
+        "仓库内的官方 e2e 精度用例带 fp32 golden，可作为结构补充；它不是本章的门禁，"
+        "门禁仍以 4.1 的 `per_test` 结果为准。该用例的 conftest 依赖见附录 B.3。"
+    )
+    doc.code(
+        r"""
+cd vllm-ascend
+source "$PWD/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_sparse_attention_overlap.py
+""",
+        "运行官方精度用例",
+    )
+    doc.p("检查点：最后一行是 `4 passed`。")
+
+    doc.h2("4.3 完整 per_test 精度用例（可选）")
+    doc.p(
+        "小内存预设会跳过 `baseline_batch_sizes` / `baseline_hit_ratios` 两条重尾巴用例，"
+        "它们固定 msl=65536，需要更大的宿主池。机器内存/大页充足时跑完整版："
+    )
+    doc.code(
+        r"""
+DSA_CPU_KV_BACKEND=offload bash per_test/run.sh precision-full
+""",
+        "完整精度用例",
+    )
+
+    doc.note(
+        "为什么精度必须先于性能",
+        [
+            "本算子有内部 planner 和外部计划两条路，只测一条会漏掉真问题。",
+            "先把数值正确性钉住，后面性能 A/B 的差异才有意义。",
+        ],
+    )
+
+
+def chapter5_perf(doc: Doc):
+    doc.set_chapter(5)
+    doc.page_break()
+    doc.h1("五、单算子性能测试")
+
+    doc.p(
+        "本章说明如何用仓库根目录的 `per_test/` 工程测量 FusedSparseAttentionOverlap "
+        "的单算子 kernel 性能，并比较优化前后的构建。整网 TPOT / 吞吐的 A/B 属于另一套流程，"
+        "不在本章范围。"
+    )
+
+    doc.note(
+        "先记住三条判据",
+        [
+            "**只看 `kernel_p50_us`**：端到端包含约 160 μs 框架开销且会漂移，不作为判据。",
+            "**差别小于门槛的不算改进**：门槛不是拍脑袋的百分比，而是这一趟测量自己的 A/A 误差棒。",
+            "**精度先过**：性能变快但精度挂了，是“错的更快”，这组性能数据直接作废。",
+        ],
+    )
+
+    doc.h2("5.1 测试工程 per_test")
+
+    doc.p(
+        "`per_test/` 放在仓库根目录，入口是 `run.sh`。所有内部路径按脚本自身位置解析，"
+        "不依赖目录名，也不需要先手动 `source` 环境；日志默认写到 `per_test/logs/`。"
+    )
+
+    doc.table(
+        "per_test 目录",
+        ["文件", "作用"],
+        [
+            ["`run.sh`", "一键入口：env / build / precision / perf / compare / check"],
+            ["`env.sh`", "CANN、SOC_VERSION、memfabric、vendor 算子包、PYTHONPATH、ulimit"],
+            ["`build_ops.sh`", "编译 vendor 算子包 + `vllm_ascend_C` .so"],
+            ["`sweep_cases.sh`", "标准曲线入口（hit / hit4 / bs / bs0 / seq / frag / ablate / validate）"],
+            ["`sweep_median.py`", "多进程跑 bench，逐点取中位数"],
+            ["`bench_fuse_sparse_attention_overlap.py`", "单进程计时 bench，产出 KERNEL / RESULT 行"],
+            ["`cmp_sweeps.py`", "两趟结果逐点比较，按 A/A 自动算门槛"],
+            ["`fake_bench.py`", "SMOKE 假 bench，秒回，不碰 NPU"],
+            ["`precision_small.sh` + `tests/test_fsao_precision.py`", "小内存精度门禁"],
+            ["`sweep_small.sh`", "小内存性能冒烟，只用于内存受限机器"],
+            ["`.gitattributes`", "强制测试文件 LF，避免 Windows 拷到 Linux 后 CRLF 报错"],
+        ],
+        [7.0, 9.4],
+        first_col_bold=True,
+    )
+
+    doc.p("常用入口：")
+    doc.code(
+        r"""
+bash per_test/run.sh env          # 自检：仓库 / SOC / memfabric / vendor 包 / python / pytest
+bash per_test/run.sh build        # 编译（可加算子名只编单个）
+bash per_test/run.sh precision    # 精度门禁
+bash per_test/run.sh perf hit4    # 标准性能曲线（本章主用）
+bash per_test/run.sh compare A.log B.log
+""",
+        "per_test 一键入口",
+    )
+
+    doc.h2("5.2 环境与构建")
+
+    doc.p("跑测试前先自检，确认输出里的 SOC、memfabric、vendor 包三项：")
+    doc.code(
+        r"""
+bash per_test/run.sh env
+""",
+        "环境自检",
+    )
+    doc.bullets([
+        "`SOC` 应为实际芯片，例如 A3 的 `ascend910_9382`、A5 的 `ascend950pr_xxx`；",
+        "`memfabric offload 可用（1.3.0 ...）`：镜像内的 MemFabric 1.3 已就绪；",
+        "`vendor op` 指向本仓库 `vllm_ascend/_cann_ops_custom/vendors/custom_transformer`；",
+        "`ulimit -l = unlimited`：host KV 池需要；脚本会尝试自动抬高。",
+    ])
+
+    doc.p("只编本算子（A5 的全量列表不含 FSAO，必须单算子；A3 单算子也更快）：")
+    doc.code(
+        r"""
+bash per_test/run.sh build fused_sparse_attention_overlap
+""",
+        "编译 FSAO 算子包",
+    )
+
+    doc.p(
+        "编译结束会打印 kernel 指纹。**换构建后必须确认指纹变了**；指纹没变说明优化没有进二进制。"
+    )
+    doc.code(
+        r"""
+find vllm_ascend/_cann_ops_custom -type f \
+  -path '*fused_sparse_attention_overlap*' -print0 \
+  | sort -z | xargs -0 md5sum | md5sum
+""",
+        "记录 FSAO 产物指纹",
+    )
+
+    doc.note(
+        "增量编译不可信",
+        [
+            "时间戳、文件名里的哈希、日志里出现算子名，三样都可能骗人；只有 `.o` 的内容 md5 不骗人。",
+            "改过 `csrc/` 下任何头文件，必须全量重编（`build_ops.sh` 默认会删 build）。",
+            "只改 kernel 时不必重装 `vllm_ascend_C.so`；如果改了算子 schema，才需要重编 .so。",
+        ],
+    )
+
+    doc.h2("5.3 测试矩阵")
+
+    doc.table(
+        "per_test 标准模式",
+        ["模式", "形状", "用途", "点数/进程"],
+        [
+            ["`hit`", "bs=16，msl=64K，扫描命中率", "命中率曲线", "44"],
+            ["`hit4`", "bs=4，msl=64K，扫描命中率", "helper 主战场（本章默认）", "44"],
+            ["`bs`", "80% 命中，扫描 batch size", "batch size 曲线", "40"],
+            ["`bs0`", "0% 命中，扫描 batch size", "搬运受限端", "40"],
+            ["`seq`", "80% 命中，扫描 msl", "序列长度曲线", "4/档"],
+            ["`frag`", "命中名次连续 vs 碎片", "碎片化归因", "16"],
+            ["`ablate`", "单点消融", "归因", "2"],
+            ["`validate`", "串行 vs 并行", "并行等价性复验", "20"],
+        ],
+        [2.2, 7.2, 5.2, 2.2],
+        first_col_bold=True,
+    )
+
+    doc.p(
+        "为什么优化 A3 主要看 `hit4`：bs=16 时 24 个核已经用满，“用上空闲核”的收益恒为零，"
+        "`hit` 是零对照臂（曲线必须平）；bs≤8 才能看到 helper 机制的真实收益。"
+        "`hit4` 与其只差 batch size，其余参数完全一致。"
+    )
+
+    doc.h2("5.4 hit4 标准参数")
+
+    doc.p("`hit4` 实际展开后的命令如下（`sweep_cases.sh` 固定参数 + 环境变量覆盖）：")
+    doc.code(
+        r"""
+python3 per_test/sweep_median.py --processes 5 --e2e --echo -- \
+  --batch-size 4 \
+  --max-seq-len 65536 \
+  --topk 2048 \
+  --q-heads 16 \
+  --topk-buffer-size 4096 \
+  --plan-direct on \
+  --warmup 10 --iters 50 --repeat 1 --kernel-time 200 --disable-gc \
+  --hit-layout strided \
+  --cpu-kv-backend offload \
+  [--dram-size-gb <DRAM_GB>] \
+  --plan-slots off,scattered \
+  --hit-ratio 0.0000,0.1000,0.2000,0.3000,0.4000,0.5000,0.6000,0.7000,0.8000,0.9000,1.0000,0.0001,0.1001,0.2001,0.2999,0.4001,0.5001,0.6001,0.7001,0.7999,0.9001,0.9999
+""",
+        "hit4 完整命令",
+    )
+
+    doc.table(
+        "hit4 参数含义",
+        ["参数", "值", "说明"],
+        [
+            ["`--batch-size`", "4", "“hit4” 的 4；`hit` 是 16"],
+            ["`--max-seq-len`", "65536", "64K 上下文"],
+            ["`--topk`", "2048", "FSAO topk"],
+            ["`--q-heads`", "16", "MLA q heads"],
+            ["`--topk-buffer-size`", "4096", "槽位数，生产默认不跟着 topk 走"],
+            ["`--plan-direct`", "on", "控制区直接寻址，与生产一致"],
+            ["`--hit-layout`", "strided", "碎片化最重的一档"],
+            ["`--plan-slots`", "off,scattered", "同一趟里交错测两条 plan 路"],
+            ["`--hit-ratio`", "11 个整点 + 11 个 A/A 标签", "0,10%,…,100% 及噪声对照"],
+            ["`--warmup` / `--iters` / `--repeat`", "10 / 50 / 1", "每点 50 次正式测量"],
+            ["`--kernel-time`", "200", "触发 KERNEL 行，不是超时"],
+            ["`--disable-gc`", "开", "减少 host 侧 Python GC 噪声"],
+            ["`--cpu-kv-backend`", "offload", "MemFabric 宿主 KV 池"],
+            ["`--dram-size-gb`", "可选", "不传按 msl 自动算（64K→1.5 GiB，对齐 2 GiB）；建议统一 `DRAM_GB=1`"],
+            ["`--processes`", "5", "5 个独立进程，逐点取中位数"],
+        ],
+        [5.2, 6.0, 5.4],
+        first_col_bold=True,
+    )
+
+    doc.p(
+        "为什么这些参数不能随手改：`topk-buffer-size` 量成 topk 会让命中显得比实际连续；"
+        "`plan-direct off` 会让 `slot >= topk` 的命中被静默判成未命中；"
+        "`hit-layout prefix` 最友好，结果偏乐观；"
+        "两条 plan 路必须一趟里交错测，分两趟中间横着 2~4%，正好是要测的差值本身的量级。"
+    )
+
+    doc.h2("5.5 测量方法：A/A、进程与门槛")
+
+    doc.p(
+        "`hit4` 默认 22 个命中率（11 个真实点 + 11 个 A/A 标签）× 2 条 `plan-slots` "
+        "= **44 点/进程**；`--processes 5` 表示 5 个进程各跑一遍，逐点取中位数。"
+    )
+    doc.bullets([
+        "**A/A 标签**：`round(r×topk)` 与对应整点完全相同，只是名字不同、排在队尾；"
+        "两次读数的差就是这一趟的误差棒。",
+        "**门槛**：取**基线臂** A/A 的两倍（下限 0.5%）；不能取两臂最大值，否则一个臂越烂判据越松。",
+        "**硬闸**：任一臂自己的 A/A 超过 2%，这一趟直接不合格——连自己都复现不出来的数，跟谁比都没意义。",
+        "**进度检查**：每个进程的点数必须一样；进程分成了几团，说明中位数落在空档里，不能用一个数概括。",
+        "**只测一次的点**：没有 A/A 标签，绝对值不可用；正式曲线不要关 `AA_LABELS`。",
+    ])
+
+    doc.p(
+        "实测时如果出现“进程间数值差很多但代码没动”，用下面的脚本查这趟是否被别的任务干扰："
+    )
+    doc.code(
+        r"""
+bash per_test/run.sh check 本趟.log 干净的那趟.log
+""",
+        "检查干扰",
+    )
+
+    doc.h2("5.6 基线 vs 优化：A/B 流程")
+
+    doc.p("推荐按下面顺序做，两个构建只允许算子二进制不同：")
+    doc.bullets([
+        "**基线**：在未优化的源码上 `run.sh build fused_sparse_attention_overlap`，"
+        "记录 kernel 指纹，跑 `DRAM_GB=1 bash per_test/run.sh perf hit4`，保存日志。",
+        "**保存基线包（可选 ABBA）**：`cp -a vllm_ascend/_cann_ops_custom /path/to/ops_base`。",
+        "**优化**：切到优化源码（例如 `origin/main`，含 PR #20927），"
+        "重新单算子编译，确认 kernel 指纹与基线不同。",
+        "**同一命令重跑**：`DRAM_GB=1 bash per_test/run.sh perf hit4`，"
+        "参数、卡、进程数、后端、池大小必须与基线完全一致。",
+        "**精度门禁**：`DSA_CPU_KV_BACKEND=offload bash per_test/run.sh precision`，必须 0 failed。",
+        "**逐点比较**：`python3 per_test/cmp_sweeps.py 基线.log 优化后.log --label-a 基线 --label-b 优化后`。",
+    ])
+
+    doc.note(
+        "A/B 公平性检查",
+        [
+            "同一台机器、同一张卡、同一批进程数；跑的过程中不要 `git pull`、不要 `| head`。",
+            "一次只跑一趟：host 内存带宽共用，两趟叠跑会偏向性污染 miss 重的一端（实测约 +6%）。",
+            "两臂的 `DRAM_GB`、`DSA_CPU_KV_BACKEND`、`hit-layout`、`plan-slots`、`kernel-time` 必须一致。",
+            "正式结论建议做 ABBA（base → opt → opt → base），用同一套 vendor 包来回切，抵消时间漂移。",
+        ],
+        accent="B45309",
+        fill="FFF7E6",
+    )
+
+    doc.p(
+        "如果两个分支的上游底座不同（例如一个基于旧 main、一个基于新 main），"
+        "那 A/B 的差异里除了目标优化，还混着其它 upstream 提交；"
+        "要严格比较单个 PR，应在**同一个底座**上回退/应用该 PR，再加 `per_test/`。"
+    )
+
+    doc.h2("5.7 结果怎么读")
+
+    doc.p("比较脚本只比 `=== kernel duration：绝对值（μs）===` 这张表，输出带判定：")
+    doc.code(
+        r"""
+python3 per_test/cmp_sweeps.py baseline.log optimized.log \
+  --label-a 基线 --label-b 优化后
+""",
+        "逐点比较",
+    )
+    doc.bullets([
+        "先看两臂 A/A：任一臂超过 2%，这组数据作废，先查干扰或重跑。",
+        "再看每个命中率点、两条 plan 路是否都变快；只在一个点快不等于整条曲线快。",
+        "变化小于门槛的标 `within noise`，不算改进。",
+        "最后看曲线形状：优化不应把某一段明显抬高。",
+        "精度结果与性能结果一起归档；同一次构建的精度日志和性能日志放在一起。",
+    ])
+
+    doc.h2("5.8 常见问题")
+
+    doc.table(
+        "性能测试常见问题",
+        ["现象", "原因", "处理"],
+        [
+            ["`$'\\r': command not found`", "Windows 拷贝时脚本是 CRLF", "只拷 `per_test/`（已强制 LF），或 `git ls-files '*.sh' | xargs sed -i 's/\\r$//'`"],
+            ["`OffloadConfig` 没有 `reserve_size/alloc_size`", "memfabric 不是 1.3", "升级 memfabric 1.3.0；脚本已按 1.3 API 编写"],
+            ["`offload.initialize returned -1 ... Map mem failed:-6`", "宿主大页/平台映射问题", "A3 通常无需配大页；A5 需配 2M 大页或平台配置，conn-based 兜底不适用于本 kernel"],
+            ["kernel 指纹没变", "增量/缓存没重编", "删 build 全量重编，检查 build-cache HIT/MISS"],
+            ["`DRAM_GB` 残留导致池过大", "shell 里 export 了旧值", "`unset DRAM_GB` 或显式 `DRAM_GB=1`"],
+            ["进程点数不一致 / 告警 `SWEEP NOT SELF-CONSISTENT`", "有进程少测/被干扰", "看告警，重跑；一次只跑一趟"],
+            ["精度通过但性能异常快/慢", "构建混了旧 `.so`/旧 vendor 包", "对比 kernel 指纹和 `.so` 时间，重新构建"],
+        ],
+        [7.0, 4.8, 4.6],
+        first_col_bold=True,
+        keep=False,
+    )
+
+    doc.h2("5.9 最小命令清单（A3）")
+
+    doc.code(
+        r"""
+cd /home/z00943842/vllm-ascend
+git checkout <优化分支>
+unset DRAM_GB DSA_OFFLOAD_GIANT_PAGE MF_HYBM_ENABLE_4K_PAGE
+
+bash per_test/run.sh env
+bash per_test/run.sh build fused_sparse_attention_overlap
+
+SMOKE=1 bash per_test/run.sh perf hit
+DRAM_GB=1 PROCS=1 RATIOS_MAIN=1.0 AA_LABELS=0 bash per_test/run.sh perf hit
+
+# 精度门禁：见第四章
+
+DRAM_GB=1 bash per_test/run.sh perf hit4
+
+python3 per_test/cmp_sweeps.py \
+  per_test/logs/baseline_hit4.log \
+  "$(ls -t per_test/logs/case_hit4_curve_*.log | head -1)" \
+  --label-a 基线 --label-b 优化后
+""",
+        "A3 性能测试最小流程",
+    )
+
+    doc.p(
+        "快速验证用的 `PROCS=1 RATIOS_MAIN=1.0 AA_LABELS=0` 只用于确认 kernel 能跑，"
+        "绝对值不能用于 A/B；正式数据必须回到默认 5 进程和 A/A 标签。"
+    )
+
+
 def appendix(doc: Doc):
     doc.set_chapter("A")
     doc.page_break()
-    doc.h1("六、附录")
+    doc.h1("八、附录")
 
     doc.h2("附录 A  编译参数与产物")
     doc.p("主流程用的是全量编译命令，一般不用改。需要调整构建方式时看下面两张表。")
@@ -1062,6 +1420,7 @@ def appendix(doc: Doc):
             ["`Sparse KV offload offload.initialize failed`", "host 连续内存不足", "下调 `dram_size_per_dp_GB`，检查 `free -g`"],
             ["`HCCL_BUFFSIZE_EP is too SMALL`", "MoE AllToAll 缓冲区不足", "`export HCCL_BUFFSIZE=512` 后重启"],
             ["`HCCL_INTRA_PCIE_ENABLE or HCCL_INTRA_ROCE_ENABLE is invalid`", "只设置了一个 intra 变量", "两个都 unset，或显式 PCIE=1 + ROCE=0"],
+            ["`No module named 'fla_npu'` / 官方精度用例 conftest 报错", "官方 e2e 用例的 conftest 依赖 FLA", "当前镜像一般已预装；缺失时从 https://github.com/flashserve/flash-linear-attention-npu/releases 下载 aarch64 wheel 安装"],
             ["加载到 `Loading safetensors checkpoint shards: 0%` 长时间不动", "大权重首次加载", "正常等待，可看 `/proc/<pid>/io` 的 read_bytes 是否增长"],
             ["`RuntimeError: HCCL ... error code is 19`", "网卡选择失败或 hostname 解析不到", "设置 `HCCL_IF_IP` / `HCCL_SOCKET_IFNAME`，检查 `/etc/hosts`"],
         ],
@@ -1110,8 +1469,10 @@ def build():
     chapter1(doc)
     chapter2(doc)
     chapter3(doc)
-    chapter4(doc)
-    chapter5(doc)
+    chapter4_precision(doc)
+    chapter5_perf(doc)
+    chapter6_service(doc)
+    chapter7_verify(doc)
     appendix(doc)
     doc.save(OUT_DOCX)
     print("docx written:", OUT_DOCX)
