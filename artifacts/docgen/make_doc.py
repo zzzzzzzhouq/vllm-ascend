@@ -1223,9 +1223,71 @@ bash per_test/run.sh check 本趟.log 干净的那趟.log
 
     doc.h2("5.6 基线 vs 优化：A/B 流程")
 
+    doc.h3("5.6.1 基线版本：vllm-ascend 0.30.0")
+
+    doc.p(
+        "基线固定使用 **vllm-ascend 0.30.0**（镜像 `vllm-ascend:0.30.0-a3` / "
+        "`vllm-ascend:0.30.0-a5`）。这个版本还没有 PR #20927 的 FSAO 优化，"
+        "作为**未优化对照**；优化版本使用包含 #20927 的 main。"
+    )
+
+    doc.p("基线源码准备（二选一）：")
+    doc.code(
+        r"""
+# 方式一（推荐）：直接用 0.30.0 镜像里自带的源码树
+cd /vllm-workspace/vllm-ascend
+# 把我们的 per_test/ 拷到仓库根目录
+
+# 方式二：在机器上单独 clone 与镜像一致的 0.30.0 源码
+#   以镜像内实际版本为准（例如 v0.30.0rc2）
+git clone -b <0.30.0-tag> https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+# 把我们的 per_test/ 拷进来
+""",
+        "准备 v0.30.0 基线源码",
+    )
+
+    doc.p("确认这个版本里没有 #20927 的优化提交，然后单算子编译：")
+    doc.code(
+        r"""
+# 没有输出 “Optimize fused_sparse_attention_overlap” 才是基线
+git log --oneline | grep -i "Optimize fused_sparse_attention_overlap" \
+  || echo "no #20927 (baseline)"
+
+export SOC_VERSION=ascend910_9382      # A3；A5 用 ascend950pr_xxx
+bash per_test/run.sh build fused_sparse_attention_overlap
+""",
+        "编译 v0.30.0 基线算子",
+    )
+
+    doc.p(
+        "编译后记录 kernel 指纹。基线跑完先把日志存成稳定名字，后面优化版本必须用完全相同的命令："
+    )
+    doc.code(
+        r"""
+DRAM_GB=1 bash per_test/run.sh perf hit4
+DSA_CPU_KV_BACKEND=offload bash per_test/run.sh precision
+
+cp "$(ls -t per_test/logs/case_hit4_curve_*.log | head -1)" \
+   per_test/logs/baseline_hit4.log
+""",
+        "跑 v0.30.0 基线并保存日志",
+    )
+
+    doc.note(
+        "基线测试的两个前提",
+        [
+            "基线必须和优化版本在同一台机器、同一张卡上跑；跨机器/跨卡不可比。",
+            "0.30.0 与 main 之间还隔着若干 upstream 提交；如果只想证明 #20927 本身，"
+            "应在同一个 main 底座上回退 #20927 作为对照。",
+        ],
+        accent="B45309",
+        fill="FFF7E6",
+    )
+
     doc.p("推荐按下面顺序做，两个构建只允许算子二进制不同：")
     doc.bullets([
-        "**基线**：在未优化的源码上 `run.sh build fused_sparse_attention_overlap`，"
+        "**基线**：用 vllm-ascend 0.30.0（未含 #20927）编译 FSAO，"
         "记录 kernel 指纹，跑 `DRAM_GB=1 bash per_test/run.sh perf hit4`，保存日志。",
         "**保存基线包（可选 ABBA）**：`cp -a vllm_ascend/_cann_ops_custom /path/to/ops_base`。",
         "**优化**：切到优化源码（例如 `origin/main`，含 PR #20927），"
