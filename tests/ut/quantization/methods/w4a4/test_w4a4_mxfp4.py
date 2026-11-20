@@ -18,6 +18,9 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -133,6 +136,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -166,6 +172,54 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].shape[2], self.hidden_size // gs)
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=True)
+    @patch(
+        "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu.npu_format_cast",
+        side_effect=lambda weight, _fmt, **_kwargs: weight.clone(),
+    )
+    # The w2 experts go through the shared FP4 recipe, which casts in its own
+    # module and reads torch_npu's FP4 enum there.
+    @patch("vllm_ascend.quantization.nz.torch_npu")
+    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, mock_nz_npu, _mock_cast, _mock_use_megamoe, mock_vllm):
+        mock_nz_npu.npu_format_cast.side_effect = lambda weight, _fmt, **_kwargs: weight.clone()
+        mock_vllm.return_value = create_mock_vllm_config()
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(
+            torch.randint(
+                0,
+                255,
+                (self.num_experts, 2 * self.intermediate_size, self.hidden_size // 2),
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.w2_weight = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, self.hidden_size, self.intermediate_size // 2), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, 2 * self.intermediate_size, 4), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, self.hidden_size, 8), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        original_scales = (layer.w13_weight_scale.detach().clone(), layer.w2_weight_scale.detach().clone())
+
+        self.scheme.process_weights_after_loading(layer)
+
+        scale_lists = (
+            layer.cann_mega_moe_w13_weight_scale_list,
+            layer.cann_mega_moe_w2_weight_scale_list,
+        )
+        for original, expert_scales in zip(original_scales, scale_lists):
+            for expert_scale, expected in zip(expert_scales, original.unbind(0)):
+                expected = expected.reshape(expected.shape[0], -1, 2)
+                self.assertEqual(expert_scale.dtype, torch.float8_e8m0fnu)
+                torch.testing.assert_close(expert_scale.view(torch.uint8), expected, rtol=0, atol=0)
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
