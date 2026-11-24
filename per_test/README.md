@@ -24,9 +24,15 @@ bash per_test/run.sh perf hit   # 5) 正式性能曲线
 
 - 性能测试的底层是 `sweep_cases.sh` / `sweep_median.py`；精度测试的底层是
   `precision_small.sh` + `tests/test_fsao_precision.py`。
+- 所有会碰 NPU 的入口都会先抢 `$TMPDIR/vllm-ascend-per-test-npu.lock` 的
+  `flock`；第二个任务直接退出，不会叠跑同机 NPU 资源。
+- 停止/排查用 `bash per_test/run.sh status` / `bash per_test/run.sh stop`：
+  只对叶进程发 `SIGTERM`，不直接 `kill -9`，发现 `State: D` 会打印
+  `/proc/<pid>/stack` 告警。
 - 所有日志默认写到 `per_test/logs/`（已 gitignore），可用 `DSA_LOGDIR` 覆盖。
 - `run.sh perf` 支持 `hit|hit4|bs|bs0|seq|frag|ablate|validate` 七种模式，
-  默认 `hit`；完整用法见 `bash per_test/run.sh help`。
+  默认 `hit`；`run.sh status` / `run.sh stop` 用来排查/停掉本 checkout 的
+  残留任务，**不再用 `pkill -9`**。完整用法见 `bash per_test/run.sh help`。
 
 ## 1. 文件清单
 
@@ -39,6 +45,9 @@ bash per_test/run.sh perf hit   # 5) 正式性能曲线
 | `per_test/cmp_sweeps.py` | **逐点比两趟，给判定**（A/A 门槛自动算） | 只读日志，纯文本处理 |
 | `per_test/check_contention.py` | 查这趟有没有被别的任务干扰 | 只读日志 |
 | `per_test/fake_bench.py` | 假 bench，`--bench` 指向它就能空跑验流程，不碰 NPU | 无 |
+| `per_test/job_guard.sh` | **NPU 任务互斥锁**：`flock` 原子占用，防两个 run 叠跑 | flock |
+| `per_test/job_control.py` | 查/停本 checkout 的 per_test 进程；只发 `SIGTERM`，识别 D 态 | /proc |
+| `per_test/stop.sh` | `run.sh stop` 的薄封装 | job_control |
 | `per_test/tests/test_fsao_precision.py` | **精度用例**，带 fp32 golden，两种签名都认 | pytest / memfabric_hybrid |
 | `per_test/precision_small.sh` | 小内存精度门禁（池 0.06 GiB，跳过两条重尾巴用例） | 上面那个用例 + env.sh |
 | `per_test/sweep_small.sh` | 小内存性能冒烟（msl/bs 更小，与标准曲线不可比） | sweep_median + env.sh |
@@ -212,6 +221,18 @@ plan_slots、--kernel-time。要跟自己的优化比，**基线也得用同样�
 5. **⚠ 多卡并行默认不可用，老实串行、固定一张卡。** 8 进程分绑 8 张卡时并行臂
    自己的 A/A 是 13.64%（串行 0.20%），且形状被改了。`--devices` 是给复验用的。
 6. **⚠ 长任务别接 `| head`**——管道一关脚本吃 SIGPIPE 被杀在半路。要截断先落盘。
+
+## 6.1 NPU 任务互斥与安全停止
+
+- `run.sh perf` / `perf-small` / `precision` / `precision-full` 都会在真正
+  起 NPU 工作前先拿 `flock`；同一时刻只允许一趟 per_test 任务。
+- 第二个任务会直接报「已有一趟在跑」，不会再启动新的 bench/pytest，
+  避免两个进程同时去碰 `torch_npu` / MemFabric / SVM 路径。
+- 停任务用 `bash per_test/run.sh stop`；它对当前 checkout 的叶进程先
+  `SIGTERM`，等 60 秒内退出，**不会自动升级成 SIGKILL**。
+- `bash per_test/run.sh status` 会列出本 checkout 相关 PID；若发现
+  `State: D` 或 `/proc/<pid>/stack` 里有 `svm_occupy_da/devmm*`，
+  说明已经进了驱动不可中断路径，别再反复杀，保留现场给运维复位/重启。
 
 ## 7. 出问题时
 

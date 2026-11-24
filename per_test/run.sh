@@ -11,6 +11,8 @@
 #   bash per_test/run.sh perf-small           # 小内存性能冒烟（内存受限机器）
 #   bash per_test/run.sh compare A.log B.log  # 两趟 sweep 逐点比较
 #   bash per_test/run.sh check 本次.log [干净.log]   # 查这趟有没有被别的任务干扰
+#   bash per_test/run.sh status               # 查看本 checkout 的 per_test 进程 / D 态告警
+#   bash per_test/run.sh stop                 # 先 SIGTERM 等退出，不做 kill -9
 #
 # 常用覆盖：
 #   DEVICES=0,1,2,3 bash per_test/run.sh perf hit       # 串行仍只用第一张卡
@@ -37,6 +39,8 @@ usage() {
   bash per_test/run.sh perf-small           # 小内存性能冒烟
   bash per_test/run.sh compare A.log B.log  # 两趟 sweep 逐点比较
   bash per_test/run.sh check 本次.log [干净.log]
+  bash per_test/run.sh status               # 查看本 checkout 的 per_test 进程 / D 态告警
+  bash per_test/run.sh stop                 # 先 SIGTERM 等退出，不做 kill -9
 
 常用覆盖：
   DEVICES=0,1,2,3 PROCS=3 bash per_test/run.sh perf hit
@@ -83,12 +87,18 @@ case "$cmd" in
         ;;
     precision)
         # 小内存版：池 0.06 GiB，自动 source env，日志写 $HERE/logs。
+        # shellcheck disable=SC1091
+        source "$HERE/job_guard.sh"
+        acquire_per_test_job_lock "precision" || exit 1
         exec bash "$HERE/precision_small.sh" "$@"
         ;;
     precision-full)
         ensure_env
         cd "$DSA_REPO" || exit 1
         # 完整版不压池，需要 ulimit -l 足够大（env.sh 会尽力抬高）。
+        # shellcheck disable=SC1091
+        source "$HERE/job_guard.sh"
+        acquire_per_test_job_lock "precision-full" || exit 1
         exec pytest -sv "$HERE/tests/test_fsao_precision.py" "$@"
         ;;
     perf)
@@ -96,10 +106,16 @@ case "$cmd" in
         [ "$#" -gt 0 ] || set -- hit
         if [ "${SMOKE:-0}" != "1" ]; then
             ensure_env
+            # shellcheck disable=SC1091
+            source "$HERE/job_guard.sh"
+            acquire_per_test_job_lock "perf" || exit 1
         fi
         exec bash "$HERE/sweep_cases.sh" "$@"
         ;;
     perf-small|small)
+        # shellcheck disable=SC1091
+        source "$HERE/job_guard.sh"
+        acquire_per_test_job_lock "perf-small" || exit 1
         exec bash "$HERE/sweep_small.sh" "$@"
         ;;
     compare)
@@ -107,6 +123,12 @@ case "$cmd" in
         ;;
     check)
         exec python3 "$HERE/check_contention.py" "$@"
+        ;;
+    status)
+        exec python3 "$HERE/job_control.py" status "$@"
+        ;;
+    stop)
+        exec bash "$HERE/stop.sh" "$@"
         ;;
     *)
         echo "未知子命令: $cmd" >&2

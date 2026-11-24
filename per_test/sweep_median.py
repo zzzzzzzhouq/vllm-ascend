@@ -44,6 +44,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import time
 import types
 
 # Resolve the bench relative to THIS file, not the cwd. As a bare relative path
@@ -55,6 +56,26 @@ _BENCH = str(
     / "bench_fuse_sparse_attention_overlap.py"
 )
 _REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _terminate_procs(processes):
+    """Best-effort cleanup for already spawned children.
+
+    Never sends SIGKILL: on Ascend driver paths that may already hold device
+    memory, a forced kill can leave the process in D state inside SVM unmap.
+    SIGTERM gives Python a chance to raise KeyboardInterrupt in the bench and
+    let its ``finally`` blocks synchronize and uninitialize MemFabric.
+    """
+
+    live = [p for p in processes if p.poll() is None]
+    for p in live:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and any(p.poll() is None for p in live):
+        time.sleep(0.1)
 
 
 def _build_stamp() -> str:
@@ -559,7 +580,11 @@ def main() -> None:
         # ⚠ returncode 必须一起带上。下面有一处判它非 0 就打 stderr ——
         #   少带这个字段，第一个进程收完就 AttributeError 崩掉，而崩之前已经
         #   打印了「进程 1/8：KERNEL 20 点」，看着像跑起来了。2026-08-12 栽过。
-        finished = [(p, pr.communicate(), pr.returncode) for p, pr in spawned]
+        try:
+            finished = [(p, pr.communicate(), pr.returncode) for p, pr in spawned]
+        except KeyboardInterrupt:
+            _terminate_procs([pr for _, pr in spawned])
+            raise
     else:
         finished = None
 

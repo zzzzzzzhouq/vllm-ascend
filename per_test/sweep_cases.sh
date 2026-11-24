@@ -58,15 +58,6 @@ export ASCEND_RT_VISIBLE_DEVICES
 REPO="${DSA_REPO:-$(cd "$HERE/.." && pwd)}"
 cd "$REPO" || exit 1
 
-_busy=""
-[ "$SMOKE" = "1" ] || _busy="$(pgrep -f 'bench_fuse_sparse_attention_overlap|sweep_median\.py' 2>/dev/null || true)"
-if [ -n "$_busy" ]; then
-    echo "❌ 已经有一趟在跑，别叠着跑 —— 主机内存带宽是共用的，两边的数字都会被污染。" >&2
-    ps -o pid=,etime=,cmd= -p $(echo "$_busy" | tr '\n' ',' | sed 's/,$//') 2>/dev/null | sed 's/^/     /' >&2
-    echo "   等它跑完，或者先停掉：pkill -f sweep_cases; pkill -f sweep_median.py; pkill -f test_fuse" >&2
-    exit 1
-fi
-
 LOGDIR="${DSA_LOGDIR:-$HERE/logs}"
 mkdir -p "$LOGDIR"
 PROCS="${PROCS:-5}"

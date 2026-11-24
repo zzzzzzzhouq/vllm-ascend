@@ -14,7 +14,7 @@
 #   bash per_test/run.sh precision
 #   DSA_DRAM_POOL_GB=0.05 bash per_test/run.sh precision     # 更紧
 #   PREC_K="128" bash per_test/run.sh precision              # 自定义 -k 筛选
-set -u
+set -uo pipefail
 
 # 本脚本所在目录：内部脚本/日志都从这里定位，不依赖目录名和 cwd。
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"

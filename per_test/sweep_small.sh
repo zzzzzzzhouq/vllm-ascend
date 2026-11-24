@@ -13,7 +13,7 @@
 #   export ASCEND_RT_VISIBLE_DEVICES=<卡号>
 #   bash per_test/run.sh perf-small
 #   MSL=4096 BS=1,2,4 PROCS=1 bash per_test/run.sh perf-small
-set -u
+set -uo pipefail
 
 # 本脚本所在目录：内部脚本/日志都从这里定位，不依赖目录名和 cwd。
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -37,12 +37,6 @@ BS="${BS:-1,2,4,8}"
 RATIOS="${RATIOS:-0,0.5,1}"
 DEVICES="${DEVICES:-0}"
 ulimit -l unlimited 2>/dev/null || true
-
-_busy="$(pgrep -f 'bench_fuse_sparse_attention_overlap|sweep_median\.py' 2>/dev/null || true)"
-if [ -n "$_busy" ]; then
-    echo "⚠ 已有 bench 在跑（pid: $_busy）。一次只跑一个，先等它结束。" >&2
-    exit 1
-fi
 
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-$DEVICES}"
 
