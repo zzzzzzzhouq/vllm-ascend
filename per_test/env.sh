@@ -68,17 +68,45 @@ fi
 #    - csrc/build.sh --soc / build_aclnn.sh 要**家族名**，会自动从具体型号映射
 #      回去（正则 ^ascend910_93）
 #    SOC_VERSION 未导出时优先用 npu-smi 识别真实型号；识别不了就留空，交给
-#    setup.py 自行探测（A2/310P/950 等非 A3 机器请手动 export 具体型号）。
-if [ -z "${SOC_VERSION:-}" ]; then
-    _dsa_chip=""; _dsa_npu=""
-    if command -v npu-smi >/dev/null 2>&1; then
-        _dsa_info="$(npu-smi info -m 2>/dev/null || true)"
-        _dsa_chip="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/Chip Name/{print $2; exit}')"
-        _dsa_npu="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/NPU Name/{print $2; exit}')"
+#    setup.py 自行探测。
+#
+# 从 npu-smi 板卡信息识别具体型号（与 setup.py:get_chip_type 一致）：
+#   ⚠ 必须用 `-t board -i 0`（板卡信息），不能用 `-m`（映射表：只有
+#     "NPU ID Chip ID Chip Logic ID Chip Name" 列，Chip Name 只写
+#     "Ascend"/"Mcu"，也没有 NPU Name）。
+#   A5（950）的 board 信息直接带 Chip Name / NPU Name（如 Ascend950PR + 957c
+#   -> ascend950pr_957c）；A2/A3/310P 可能要加 `-c 0` 才有 Chip Name。
+_dsa_detect_soc() {
+    command -v npu-smi >/dev/null 2>&1 || return 0
+    _dsa_board_field() {
+        printf '%s\n' "$1" | awk -v key="$2" '
+            index($0, key) {
+                n = split($0, a, ":");
+                v = a[n];
+                gsub(/^[ \t\r]+|[ \t\r]+$/, "", v);
+                print tolower(v);
+                exit
+            }'
+    }
+    _dsa_info="$(npu-smi info -t board -i 0 2>/dev/null || true)"
+    _dsa_chip="$(_dsa_board_field "$_dsa_info" "Chip Name")"
+    _dsa_npu="$(_dsa_board_field "$_dsa_info" "NPU Name")"
+    if [ -z "$_dsa_chip" ]; then
+        _dsa_info="$(npu-smi info -t board -i 0 -c 0 2>/dev/null || true)"
+        _dsa_chip="$(_dsa_board_field "$_dsa_info" "Chip Name")"
+        _dsa_npu="$(_dsa_board_field "$_dsa_info" "NPU Name")"
     fi
-    case "${_dsa_chip,,}" in
-        *910*|*950*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
+    case "$_dsa_chip" in
+        *910*|*950*)
+            if [ -n "$_dsa_npu" ]; then printf '%s_%s\n' "$_dsa_chip" "$_dsa_npu"; fi
+            ;;
     esac
+    return 0
+}
+
+if [ -z "${SOC_VERSION:-}" ]; then
+    _dsa_detected="$(_dsa_detect_soc)"
+    if [ -n "$_dsa_detected" ]; then export SOC_VERSION="$_dsa_detected"; fi
     if [ -n "${SOC_VERSION:-}" ]; then
         echo "[env.sh] SOC_VERSION 未导出，已从 npu-smi 识别为 $SOC_VERSION"
     else
@@ -88,12 +116,30 @@ else
     echo "[env.sh] SOC_VERSION=$SOC_VERSION（沿用外部导出）"
     case "$SOC_VERSION" in
         ascend910_93|ascend910b|ascend310p|ascend950)
+            _dsa_detected="$(_dsa_detect_soc)"
             echo "[env.sh] ⚠ 这是家族名：csrc/build.sh --soc 认它，但 setup.py 的 cmake"
             echo "[env.sh]   只认具体型号（A3=ascend910_9382）。build_ops.sh 会自动纠正，"
-            echo "[env.sh]   想手动改就 unset SOC_VERSION 后重 source。"
+            if [ -n "$_dsa_detected" ]; then
+                echo "[env.sh]   实卡识别值=$_dsa_detected；想手动改就 unset SOC_VERSION 后重 source。"
+            else
+                echo "[env.sh]   想手动改就 unset SOC_VERSION 后重 source。"
+            fi
+            ;;
+        *)
+            # 外部值可能是镜像 ENV 的默认值（如 Dockerfile.a5 的
+            # ascend950dt_9582），与实卡不一致时提示，但不擅自覆盖。
+            if [ "${DSA_SKIP_SOC_CHECK:-0}" != "1" ]; then
+                _dsa_detected="$(_dsa_detect_soc)"
+                if [ -n "$_dsa_detected" ] && [ "$_dsa_detected" != "$SOC_VERSION" ]; then
+                    echo "[env.sh] ⚠ 外部 SOC_VERSION=$SOC_VERSION 与 npu-smi 实卡识别值 $_dsa_detected 不一致"
+                    echo "[env.sh]   如果外部值是镜像 ENV 的默认值，请 unset SOC_VERSION 后重新 source，"
+                    echo "[env.sh]   或显式 export SOC_VERSION=$_dsa_detected（跳过检查：DSA_SKIP_SOC_CHECK=1）"
+                fi
+            fi
             ;;
     esac
 fi
+unset -f _dsa_detect_soc
 
 # 3) 自定义算子 vendor 包（build_ops.sh 的产物就装在仓库里）。
 _dsa_vendor="$_dsa_repo/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"

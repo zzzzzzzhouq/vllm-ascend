@@ -34,18 +34,47 @@ REPO="${REPO:-$_here}"
 echo "REPO=$REPO"
 cd "$REPO" || exit 1
 
-if [ -z "${SOC_VERSION:-}" ]; then
-    _dsa_chip=""; _dsa_npu=""
-    if command -v npu-smi >/dev/null 2>&1; then
-        _dsa_info="$(npu-smi info -m 2>/dev/null || true)"
-        _dsa_chip="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/Chip Name/{print $2; exit}')"
-        _dsa_npu="$(printf '%s\n' "$_dsa_info" | awk -F': ' '/NPU Name/{print $2; exit}')"
+# 从 npu-smi 板卡信息识别具体型号（与 setup.py:get_chip_type 一致）：
+#   ⚠ 必须用 `-t board -i 0`（板卡信息），不能用 `-m`（映射表：只有
+#     "NPU ID Chip ID Chip Logic ID Chip Name" 列，Chip Name 只写
+#     "Ascend"/"Mcu"，也没有 NPU Name）。
+#   A5（950）直接带 Chip Name / NPU Name（Ascend950PR + 957c ->
+#   ascend950pr_957c）；A2/A3/310P 可能要加 `-c 0` 才有 Chip Name。
+_dsa_detect_soc() {
+    command -v npu-smi >/dev/null 2>&1 || return 0
+    _dsa_board_field() {
+        printf '%s\n' "$1" | awk -v key="$2" '
+            index($0, key) {
+                n = split($0, a, ":");
+                v = a[n];
+                gsub(/^[ \t\r]+|[ \t\r]+$/, "", v);
+                print tolower(v);
+                exit
+            }'
+    }
+    _dsa_info="$(npu-smi info -t board -i 0 2>/dev/null || true)"
+    _dsa_chip="$(_dsa_board_field "$_dsa_info" "Chip Name")"
+    _dsa_npu="$(_dsa_board_field "$_dsa_info" "NPU Name")"
+    if [ -z "$_dsa_chip" ]; then
+        _dsa_info="$(npu-smi info -t board -i 0 -c 0 2>/dev/null || true)"
+        _dsa_chip="$(_dsa_board_field "$_dsa_info" "Chip Name")"
+        _dsa_npu="$(_dsa_board_field "$_dsa_info" "NPU Name")"
     fi
-    case "${_dsa_chip,,}" in
-        *910*|*950*) if [ -n "$_dsa_npu" ]; then export SOC_VERSION="${_dsa_chip,,}_${_dsa_npu,,}"; fi ;;
+    case "$_dsa_chip" in
+        *910*|*950*)
+            if [ -n "$_dsa_npu" ]; then printf '%s_%s\n' "$_dsa_chip" "$_dsa_npu"; fi
+            ;;
     esac
-    if [ -n "${SOC_VERSION:-}" ]; then
+    return 0
+}
+
+if [ -z "${SOC_VERSION:-}" ]; then
+    SOC_VERSION="$(_dsa_detect_soc)"
+    if [ -n "$SOC_VERSION" ]; then
+        export SOC_VERSION
         echo "SOC_VERSION 未导出，已从 npu-smi 识别为 $SOC_VERSION"
+    else
+        unset SOC_VERSION
     fi
 fi
 if [ -z "${SOC_VERSION:-}" ]; then
@@ -64,15 +93,10 @@ echo "SOC_VERSION=$SOC_VERSION"
 # 外部 shell 残留家族名时，这里自动用 npu-smi 换成具体型号；换不了就报错退出。
 case "$SOC_VERSION" in
     ascend910_93|ascend910b|ascend310p|ascend950)
-        if command -v npu-smi >/dev/null 2>&1; then
-            _c="$(npu-smi info -m 2>/dev/null | awk -F': ' '/Chip Name/{print $2; exit}' | tr 'A-Z' 'a-z')"
-            _n="$(npu-smi info -m 2>/dev/null | awk -F': ' '/NPU Name/{print $2; exit}' | tr 'A-Z' 'a-z')"
-        else
-            _c=""; _n=""
-        fi
-        if [ -n "$_c" ] && [ -n "$_n" ]; then
-            echo "⚠ SOC_VERSION=$SOC_VERSION 是家族名（cmake 不认），已改用 npu-smi 识别的 ${_c}_${_n}"
-            export SOC_VERSION="${_c}_${_n}"
+        _dsa_detected="$(_dsa_detect_soc)"
+        if [ -n "$_dsa_detected" ]; then
+            echo "⚠ SOC_VERSION=$SOC_VERSION 是家族名（cmake 不认），已改用 npu-smi 识别的 $_dsa_detected"
+            export SOC_VERSION="$_dsa_detected"
         else
             echo "❌ SOC_VERSION=$SOC_VERSION 是家族名，cmake 只认具体型号；npu-smi 也没识别出来。"
             echo "   请 export SOC_VERSION=<具体型号>（A3=ascend910_9382，A2=ascend910b1）后重跑"
@@ -80,6 +104,7 @@ case "$SOC_VERSION" in
         fi
         ;;
 esac
+unset -f _dsa_detect_soc
 echo "SOC_VERSION(具体型号,cmake 用)=$SOC_VERSION"
 
 # csrc/build.sh 的 --soc 要家族名（ascend910_93），从具体型号推导：
