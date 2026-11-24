@@ -34,4 +34,39 @@ acquire_per_test_job_lock() {
         "$$" "$(date -Is)" "$job" "$PWD" >"$PER_TEST_JOB_LOCK"
     export PER_TEST_LOCK_HELD=1
     echo "🔒 已取得 NPU 测试互斥锁：$PER_TEST_JOB_LOCK（pid=$$, job=$job）"
+    if ! check_per_test_dstate; then
+        eval "exec ${PER_TEST_JOB_LOCK_FD}>&-"
+        unset PER_TEST_LOCK_HELD
+        return 1
+    fi
 }
+
+# Refuse to start when a leftover per_test process is already wedged in the
+# Ascend driver (D state). A second job touching device memory will queue
+# behind the same svm_occupy_da / devmm lock and become unkillable too.
+check_per_test_dstate() {
+    local stale=0 pid state cmdline
+    for pid_dir in /proc/[0-9]*; do
+        pid="${pid_dir##*/}"
+        [ "$pid" = "$$" ] && continue
+        if ! cmdline="$(tr '\0' ' ' <"$pid_dir/cmdline" 2>/dev/null)"; then
+            continue
+        fi
+        case "$cmdline" in
+            *sweep_cases*|*sweep_small*|*precision_small*|*sweep_median*|*bench_fuse*|*test_fsao*) ;;
+            *) continue ;;
+        esac
+        state="$(awk '/^State:/{print $2; exit}' "$pid_dir/status" 2>/dev/null)"
+        if [[ "$state" == D* ]]; then
+            if [ "$stale" = 0 ]; then
+                echo "❌ 发现有上次的 per_test 进程还卡在 D 态（驱动不可中断路径）。" >&2
+                echo "   再起任务会排在同一个 svm_occupy_da/devmm 锁后面陪葬，已拒绝启动。" >&2
+                stale=1
+            fi
+            echo "   PID $pid  $state  ${cmdline:0:160}" >&2
+            awk 'NR<=8' "$pid_dir/stack" 2>/dev/null | sed 's/^/      /' >&2
+        fi
+    done
+    [ "$stale" = 0 ]
+}
+
